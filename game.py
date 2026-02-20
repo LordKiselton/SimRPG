@@ -30,10 +30,10 @@ import streamlit as st
 Role = Literal["narrator", "player", "world", "system"]
 
 ROLE_TO_CHAT = {
-    "narrator": "assistant",  # ведущий/мастер
-    "world": "assistant",     # город/мир
-    "system": "assistant",    # системные уведомления
-    "player": "user",         # игрок
+    "narrator": "assistant",
+    "world": "assistant",
+    "system": "assistant",
+    "player": "user",
 }
 
 ROLE_PREFIX = {
@@ -471,7 +471,7 @@ def step_world(w: World, player_action: str) -> Optional[str]:
 
 
 # -----------------------------
-# Streamlit UI (Variant B + separate log window)
+# Streamlit UI (Chat feed)
 # -----------------------------
 
 st.set_page_config(page_title="Нерисса: CRPG-диалог + HUD", layout="wide")
@@ -488,18 +488,19 @@ st.markdown("""
 }
 .hud-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 6px; opacity: 0.95; }
 .hud-small { font-size: 0.85rem; opacity: 0.85; }
-.choice-wrap {
-  position: sticky;
-  bottom: 0;
-  z-index: 10;
-  padding-top: 10px;
-  background: linear-gradient(to top, rgba(14,17,23,0.98), rgba(14,17,23,0.0));
+
+/* Chat feed box */
+.chat-feed {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 6px;
+  background: rgba(255,255,255,0.01);
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("Нерисса: Пепельная неделя — вертикальный срез")
-st.caption("Слева — диалог (как в CRPG), справа — HUD города. Журнал вынесен отдельно, чтобы главный экран оставался чистым.")
+st.caption("Диалог живёт в отдельной ленте с внутренней прокруткой. Новые сообщения всегда рядом, без скролла страницы.")
 
 with st.sidebar:
     st.header("Сессия")
@@ -571,8 +572,7 @@ if "ending" not in st.session_state:
 
 w: World = st.session_state["world"]
 
-
-# --- LAYOUT: Variant B ---
+# Layout
 chat_col, hud_col = st.columns([0.70, 0.30], gap="large")
 
 with hud_col:
@@ -627,62 +627,32 @@ with chat_col:
         st.markdown(st.session_state["ending"])
         st.info("Нажми **Новая игра / Сброс мира** в сайдбаре, чтобы сыграть ещё раз.")
 
-    # -----------------------------
-    # Main dialogue view + Separate log window
-    # -----------------------------
-    st.markdown("### Диалог")
+    # Controls for chat feed
+    cA, cB, cC = st.columns([1, 1, 1])
+    with cA:
+        chat_height = st.slider("Высота ленты", 350, 900, 650, 50, key="chat_height")
+    with cB:
+        render_last = st.slider("Сообщений в ленте", 30, 400, 140, 10, key="render_last")
+    with cC:
+        if st.button("⬇️ Вниз к последнему", use_container_width=True):
+            st.rerun()
 
-    # Keep main screen clean: show last N messages only
-    main_keep = st.slider(
-        "Сколько сообщений держать на главном экране",
-        min_value=10,
-        max_value=120,
-        value=40,
-        step=10,
-        help="Это «витрина» текущей сцены. Полная история — в журнале ниже.",
-        key="main_keep_slider",
-    )
-
-    if not w.log:
-        st.info("Пока пусто. Выбери действие снизу.")
-    else:
-        for m in w.log[-main_keep:]:
-            with st.chat_message(ROLE_TO_CHAT[m.role]):
-                st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
-
-    # Separate "window" for full log (popover if available, else expander)
-    def render_log_window():
-        st.caption("Полный журнал: удобно листать, не перегружая сцену.")
-        log_keep = st.slider(
-            "Сколько последних сообщений показать в журнале",
-            min_value=50,
-            max_value=max(50, len(w.log)),
-            value=min(300, len(w.log)) if len(w.log) > 0 else 50,
-            step=50,
-            key="log_keep_slider",
-        )
-        log_container = st.container(height=420)
-        with log_container:
-            if not w.log:
-                st.write("Журнал пуст.")
-            else:
-                for m in w.log[-log_keep:]:
+    # Chat feed container (fixed height, internal scroll)
+    feed = st.container(height=chat_height)
+    with feed:
+        st.markdown('<div class="chat-feed">', unsafe_allow_html=True)
+        if not w.log:
+            st.info("Пока пусто. Выбери действие ниже.")
+        else:
+            msgs = w.log[-render_last:]
+            for m in msgs:
+                with st.chat_message(ROLE_TO_CHAT[m.role]):
                     st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
-                    st.divider()
+            st.markdown("<div id='chat-bottom'></div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    try:
-        with st.popover("📜 Журнал событий"):
-            render_log_window()
-    except Exception:
-        with st.expander("📜 Журнал событий"):
-            render_log_window()
-
-    # -----------------------------
-    # Choice panel (kept intact)
-    # -----------------------------
-    st.markdown('<div class="choice-wrap">', unsafe_allow_html=True)
+    # Choice panel
     st.markdown("### Выбор реплики / действия")
-
     disabled = bool(st.session_state["ending"]) or (w.day > w.max_days)
 
     options = ["investigate", "support_temple", "support_mages", "support_merchants", "spread_rumour", "bribe", "noop"]
@@ -696,8 +666,8 @@ with chat_col:
     )
     st.caption(PLAYER_ACTIONS_RU[choice]["desc"])
 
-    c1, c2 = st.columns([1, 1])
-    with c1:
+    b1, b2 = st.columns([1, 1])
+    with b1:
         if st.button("Сказать/Сделать это", type="primary", use_container_width=True, disabled=disabled):
             ending = step_world(w, choice)
             if ending:
@@ -710,7 +680,7 @@ with chat_col:
                 )
             st.rerun()
 
-    with c2:
+    with b2:
         if st.button("Пропустить ход", use_container_width=True, disabled=disabled):
             ending = step_world(w, "noop")
             if ending:
@@ -722,5 +692,3 @@ with chat_col:
                     "Город выжил — и это уже событие. Но узлы затянуты, а не развязаны."
                 )
             st.rerun()
-
-    st.markdown("</div>", unsafe_allow_html=True)
