@@ -3,14 +3,13 @@
 #   pip install streamlit pandas
 #   streamlit run game.py
 #
-# Optional:
-#   Create factions.csv рядом с game.py:
-#     name,power,stability,radicalization,resources
-#     Merchants,60,70,20,75
-#     Temple,55,65,40,55
-#     Mages,45,50,30,50
-#     Lodge,30,60,20,40
-#     Council,35,50,25,45
+# Optional factions.csv рядом с game.py:
+# name,power,stability,radicalization,resources
+# Merchants,60,70,20,75
+# Temple,55,65,40,55
+# Mages,45,50,30,50
+# Lodge,30,60,20,40
+# Council,35,50,25,45
 
 from __future__ import annotations
 
@@ -30,9 +29,9 @@ import streamlit as st
 Role = Literal["narrator", "player", "world", "system"]
 
 ROLE_TO_CHAT = {
-    "narrator": "assistant",
-    "world": "assistant",
-    "system": "assistant",
+    "narrator": "assistant",  # ведущий / хроникёр
+    "world": "assistant",     # мир/город
+    "system": "assistant",    # системные подсказки (в этой версии в чат почти не пишем)
     "player": "user",
 }
 
@@ -82,6 +81,10 @@ class World:
 
     crisis_truth: str = "unknown"  # lodge/mages/merchants/accident
 
+    # buffer for "1 choice -> 1 narrator answer"
+    buffer_mode: bool = False
+    _buffer: List[Tuple[Role, str]] = field(default_factory=list)
+
     def rng(self) -> random.Random:
         return random.Random(self.seed + self.day * 999)
 
@@ -93,7 +96,21 @@ class World:
             f.clamp()
 
     def push(self, role: Role, text: str):
-        self.log.append(Message(role=role, content=text))
+        # When buffering, we don't spam the chat; we collect and later render one summary.
+        if self.buffer_mode:
+            self._buffer.append((role, text))
+        else:
+            self.log.append(Message(role=role, content=text))
+
+    def buffer_start(self):
+        self.buffer_mode = True
+        self._buffer = []
+
+    def buffer_end(self) -> List[Tuple[Role, str]]:
+        self.buffer_mode = False
+        buf = self._buffer[:]
+        self._buffer = []
+        return buf
 
 
 # -----------------------------
@@ -271,7 +288,6 @@ def intent_title_ru(intent: str) -> str:
 
 
 def intent_reason_ru(w: World, f: Faction, intent: str) -> str:
-    # короткая причина “почему так”
     if intent == "law" and f.name == "Merchants":
         return f"экономический стресс высокий ({w.economic_stress})"
     if intent == "propaganda" and f.name == "Temple" and w.magical_tension > 70:
@@ -472,31 +488,8 @@ def check_ending(w: World) -> Optional[str]:
     return None
 
 
-def step_world(w: World, player_action: str) -> Optional[str]:
-    w.push("narrator", f"**{day_title(w.day)}**")
-    w.push("player", apply_player_action(w, player_action))
-
-    for f in list(w.factions.values()):
-        intent = faction_intent(w, f)
-        w.push("world", apply_faction_action(w, f, intent))
-
-    for e in system_escalations(w):
-        w.push("world", e)
-
-    # Natural drift
-    w.public_fear += 1 if w.economic_stress > 65 else -2
-    w.economic_stress += 1 if w.public_fear > 75 else 0
-    if "Temple" in w.factions and "Mages" in w.factions:
-        w.magical_tension += 1 if w.factions["Temple"].power > w.factions["Mages"].power + 20 else -1
-
-    w.clamp()
-    ending = check_ending(w)
-    w.day += 1
-    return ending
-
-
 # -----------------------------
-# Explainability helpers (Δ report + preview)
+# Explainability (snapshots, deltas, previews)
 # -----------------------------
 
 def snapshot_world(w: World) -> dict:
@@ -518,17 +511,10 @@ def snapshot_world(w: World) -> dict:
 
 
 def fmt_delta(x: int) -> str:
-    if x > 0:
-        return f"+{x}"
-    return str(x)
+    return f"+{x}" if x > 0 else str(x)
 
 
-def make_delta_report(before: dict, after: dict, player_action: str) -> str:
-    ge = after["economic_stress"] - before["economic_stress"]
-    gf = after["public_fear"] - before["public_fear"]
-    gm = after["magical_tension"] - before["magical_tension"]
-
-    # Top faction changes by absolute sum on key stats (power/stability/rad/resources)
+def top_faction_changes(before: dict, after: dict, top_n: int = 2):
     changes = []
     for name, b in before["factions"].items():
         a = after["factions"].get(name)
@@ -544,44 +530,10 @@ def make_delta_report(before: dict, after: dict, player_action: str) -> str:
         if score > 0:
             changes.append((score, name, b, a))
     changes.sort(reverse=True, key=lambda t: t[0])
-    top = changes[:2]
-
-    lines = []
-    lines.append("**Итог хода (что реально поменялось):**")
-    lines.append(
-        f"- Город: Экономика **{fmt_delta(ge)}**, Страх **{fmt_delta(gf)}**, Магия **{fmt_delta(gm)}**"
-    )
-
-    if top:
-        lines.append("- Фракции (самые заметные сдвиги):")
-        for _, name, b, a in top:
-            parts = []
-            for k, ru in [("power", "влияние"), ("stability", "стаб"), ("radicalization", "рад"), ("resources", "рес"), ("rel_player", "отношение")]:
-                d = a[k] - b[k]
-                if d != 0:
-                    parts.append(f"{ru} {fmt_delta(d)}")
-            lines.append(f"  - {fr(name)}: " + (", ".join(parts) if parts else "без явных сдвигов"))
-
-    # Short “why” hint (non-exhaustive but helpful)
-    why = {
-        "investigate": "Расследование обычно снижает истерию, а иногда бьёт по реальному виновнику (если ты попал в след).",
-        "support_temple": "Публичная поддержка Храма укрепляет порядок, но почти всегда поднимает градус конфликта вокруг магии.",
-        "support_mages": "Защита магов снижает риск линчевания, но может радикализировать их противников.",
-        "support_merchants": "Решение поставок разгружает экономику и усиливает Торговую гильдию (часто за счёт Совета).",
-        "spread_rumour": "Слухи ослабляют цель, но подпитывают общий страх.",
-        "bribe": "Подкуп улучшает отношение выбранной силы к тебе, но съедает её ресурсы (и оставляет след в городе).",
-        "noop": "Бездействие оставляет инициативу другим: город сам себя накручивает.",
-    }.get(player_action, "Город отреагировал на твоё действие и собственные внутренние триггеры.")
-    lines.append(f"- Почему так: _{why}_")
-
-    return "\n".join(lines)
+    return changes[:top_n]
 
 
 def preview_effect_ru(action: str) -> Tuple[str, str]:
-    """
-    Returns (short bullets, disclaimer)
-    """
-    # Arrows are approximate, not guaranteed.
     if action == "investigate":
         return (
             "- Ожидаемо: **Страх ↓**, иногда **Экономика ↓**\n"
@@ -593,7 +545,7 @@ def preview_effect_ru(action: str) -> Tuple[str, str]:
         return (
             "- Ожидаемо: **Храм ↑**, **Магия ↑**\n"
             "- Побочный эффект: **стабильность магов ↓**",
-            "Превью приблизительное: если страх высок, эффект может усилиться через реакции фракций."
+            "Превью приблизительное: при высоком страхе цепочки реакций могут усилиться."
         )
     if action == "support_mages":
         return (
@@ -612,13 +564,13 @@ def preview_effect_ru(action: str) -> Tuple[str, str]:
             "- Ожидаемо: **влияние цели ↓**, **Страх ↑**\n"
             "- Хорошо для: раскачки политического баланса\n"
             "- Плохо для: стабильности города",
-            "Превью приблизительное: цель выбирается контекстно (в текущей версии — случайно)."
+            "Превью приблизительное: цель выбирается контекстно (в этой версии — случайно)."
         )
     if action == "bribe":
         return (
             "- Ожидаемо: **отношение выбранной силы к тебе ↑**\n"
             "- Цена: **её ресурсы ↓**",
-            "Превью приблизительное: цель выбирается контекстно (в текущей версии — случайно)."
+            "Превью приблизительное: цель выбирается контекстно (в этой версии — случайно)."
         )
     if action == "noop":
         return (
@@ -629,11 +581,186 @@ def preview_effect_ru(action: str) -> Tuple[str, str]:
     return ("- Ожидаемо: эффект зависит от контекста", "Превью приблизительное.")
 
 
+def narrate_delta_and_changes(before: dict, after: dict) -> Tuple[str, str]:
+    ge = after["economic_stress"] - before["economic_stress"]
+    gf = after["public_fear"] - before["public_fear"]
+    gm = after["magical_tension"] - before["magical_tension"]
+
+    # One-line numeric summary
+    delta_line = (
+        f"**Итог:** Экономика {fmt_delta(ge)}, Страх {fmt_delta(gf)}, Магия {fmt_delta(gm)}."
+    )
+
+    # One or two biggest faction movements, in natural language
+    top = top_faction_changes(before, after, top_n=2)
+    if not top:
+        return delta_line, "Во фракциях заметных сдвигов не видно — но это тоже сигнал: все затаились."
+
+    phrases = []
+    for _, name, b, a in top:
+        # pick 1-2 strongest deltas for phrasing
+        deltas = []
+        for key, ru in [("power", "влияние"), ("stability", "устойчивость"), ("radicalization", "радикализация"), ("resources", "ресурсы")]:
+            d = a[key] - b[key]
+            if d != 0:
+                deltas.append((abs(d), d, ru))
+        deltas.sort(reverse=True, key=lambda t: t[0])
+        deltas = deltas[:2]
+
+        if not deltas:
+            continue
+
+        bits = []
+        for _, d, ru in deltas:
+            direction = "растут" if d > 0 else "падают"
+            bits.append(f"{ru} {direction} ({fmt_delta(d)})")
+        phrases.append(f"У {fr(name)} {', '.join(bits)}.")
+
+    return delta_line, " ".join(phrases) if phrases else "Фракции двигаются, но без резких прыжков — пока."
+
+
+def compress_buffer_to_scene(
+    player_action_key: str,
+    buffer_events: List[Tuple[Role, str]],
+    before: dict,
+    after: dict,
+) -> Tuple[str, List[str]]:
+    """
+    Returns:
+      scene_text: single narrator message combining everything (narrative + crisp feedback)
+      debug_lines: list of raw events (for expander)
+    """
+
+    # --- 1) Take the player immediate consequence (first "player action" text) as the opening beat
+    opening = ""
+    for role, text in buffer_events:
+        # apply_player_action returns a long narrative consequence; it's the first thing pushed after narrator header
+        # In our buffered simulation, we don't push narrator header; we only buffer consequences.
+        if role == "player" or role == "world" or role == "narrator":
+            # We'll identify the "player action consequence" by matching the action key lightly:
+            # easier: just take the first buffered chunk as opening beat, since we start buffer before step.
+            opening = text
+            break
+
+    # --- 2) Pick 1-2 strongest non-player beats (faction moves / escalations / clues)
+    # Heuristic: prioritize escalations and clues (contain "Улика:" or dramatic keywords)
+    keywords_hi = ["Улика:", "вспыхивает", "Толпа", "пожар", "катастроф", "маяк", "маск", "сигил", "шторм"]
+    scored = []
+    for i, (role, text) in enumerate(buffer_events):
+        if i == 0:
+            continue  # opening already
+        score = 0
+        for kw in keywords_hi:
+            if kw.lower() in text.lower():
+                score += 3
+        # Mild bias: short punchy lines are readable
+        score += max(0, 2 - (len(text) // 240))
+        scored.append((score, i, role, text))
+    scored.sort(reverse=True, key=lambda t: t[0])
+
+    beats = []
+    for score, i, role, text in scored[:3]:
+        if score <= 0:
+            continue
+        beats.append(text)
+
+    # If no beats, fallback to one generic line
+    if not beats:
+        beats = ["В городе всё шевелится почти бесшумно — но в этом и опасность: тихие решения часто самые дальнобойные."]
+
+    # --- 3) Numeric and faction summary lines
+    delta_line, faction_phrase = narrate_delta_and_changes(before, after)
+
+    # --- 4) Stitch into one coherent narrator scene
+    # Keep it compact: 3–6 short paragraphs.
+    parts = []
+    parts.append(f"**{day_title(after.get('day', 0) or 0)}**" if False else "")  # unused placeholder
+
+    parts.append(opening.strip())
+
+    # “Монтаж”: 1–2 lines from city reaction
+    # pick 1-2 beats max in narrative body (avoid wall)
+    montage = beats[:2]
+    if montage:
+        parts.append("\n\n".join(montage).strip())
+
+    # Insert concise feedback
+    parts.append(f"{delta_line}\n\n{faction_phrase}")
+
+    # Soft nudge: remind the player that thresholds matter
+    nudge = []
+    if after["public_fear"] >= 75:
+        nudge.append("страх близко к порогу бунта")
+    if after["economic_stress"] >= 70:
+        nudge.append("рынок перегрет")
+    if after["magical_tension"] >= 75:
+        nudge.append("магия на грани срыва")
+    if nudge:
+        parts.append(f"_Пороговые риски_: **{', '.join(nudge)}**.")
+
+    # Final
+    scene_text = "\n\n".join([p for p in parts if p]).strip()
+
+    # Debug lines
+    debug_lines = [f"[{role}] {text}" for role, text in buffer_events]
+
+    return scene_text, debug_lines
+
+
 # -----------------------------
-# Streamlit UI (Chat feed + explainability)
+# Step function: simulate internally, write 1 narrator message
 # -----------------------------
 
-st.set_page_config(page_title="Нерисса: CRPG-диалог + HUD", layout="wide")
+def step_world_compact(w: World, player_action: str) -> Tuple[Optional[str], List[str]]:
+    """
+    Runs a full turn but produces ONE narrator message instead of many.
+    Returns: (ending, debug_lines)
+    """
+    before = snapshot_world(w)
+
+    # buffer everything that would have been spammed into chat
+    w.buffer_start()
+
+    # We still want the immediate consequence text; we buffer it.
+    w.push("player", apply_player_action(w, player_action))
+
+    # Factions act (buffered)
+    for f in list(w.factions.values()):
+        intent = faction_intent(w, f)
+        w.push("world", apply_faction_action(w, f, intent))
+
+    # System escalations (buffered)
+    for e in system_escalations(w):
+        w.push("world", e)
+
+    # Natural drift
+    w.public_fear += 1 if w.economic_stress > 65 else -2
+    w.economic_stress += 1 if w.public_fear > 75 else 0
+    if "Temple" in w.factions and "Mages" in w.factions:
+        w.magical_tension += 1 if w.factions["Temple"].power > w.factions["Mages"].power + 20 else -1
+
+    w.clamp()
+    ending = check_ending(w)
+
+    # advance day
+    w.day += 1
+
+    after = snapshot_world(w)
+    buffered = w.buffer_end()
+
+    scene_text, debug_lines = compress_buffer_to_scene(player_action, buffered, before, after)
+
+    # One narrator message in the main log
+    w.push("narrator", scene_text)
+
+    return ending, debug_lines
+
+
+# -----------------------------
+# Streamlit UI
+# -----------------------------
+
+st.set_page_config(page_title="Нерисса: CRPG-диалог + HUD (compact turn)", layout="wide")
 
 st.markdown("""
 <style>
@@ -663,8 +790,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Нерисса: Пепельная неделя — вертикальный срез")
-st.caption("Добавлено: превью эффектов выбора, намерения фракций (с причинами), отчёт по дельтам после хода.")
+st.title("Нерисса: Пепельная неделя — компактный ход")
+st.caption("Теперь: **1 выбор игрока → 1 ответ Хроникёра** (внутри: реакция города, фракции, события, итог по дельтам).")
 
 with st.sidebar:
     st.header("Сессия")
@@ -724,6 +851,7 @@ with st.sidebar:
         df = st.session_state.get("factions_df", load_factions_df())
         st.session_state["world"] = init_world_from_df(df, seed=seed, max_days=max_days)
         st.session_state["ending"] = None
+        st.session_state["debug_last_turn"] = []
         st.toast("Мир перезапущен", icon="🌍")
 
 
@@ -733,6 +861,9 @@ if "world" not in st.session_state:
 
 if "ending" not in st.session_state:
     st.session_state["ending"] = None
+
+if "debug_last_turn" not in st.session_state:
+    st.session_state["debug_last_turn"] = []
 
 w: World = st.session_state["world"]
 
@@ -759,14 +890,11 @@ with hud_col:
     st.markdown("<div class='hud-small'>" + "<br>".join(risks) + "</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Intentions (explainable AI for factions)
     st.markdown('<div class="hud-card">', unsafe_allow_html=True)
-    st.markdown('<div class="hud-title">Намерения фракций (почему они так ходят)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hud-title">Намерения фракций (прогноз хода)</div>', unsafe_allow_html=True)
     for f in w.factions.values():
         intent = faction_intent(w, f)
-        st.markdown(
-            f"- **{fr(f.name)}**: _{intent_title_ru(intent)}_ — {intent_reason_ru(w, f, intent)}"
-        )
+        st.markdown(f"- **{fr(f.name)}**: _{intent_title_ru(intent)}_ — {intent_reason_ru(w, f, intent)}")
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="hud-card">', unsafe_allow_html=True)
@@ -783,15 +911,13 @@ with hud_col:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    with st.expander("Подробности (отладка)"):
-        rows2 = []
-        for f in w.factions.values():
-            rows2.append({
-                "фракция": fr(f.name),
-                "эфф_сила": compute_effective_power(f),
-                "отношение_к_тебе": f.rel_player,
-            })
-        st.dataframe(pd.DataFrame(rows2), use_container_width=True, hide_index=True)
+    with st.expander("Подробности последнего хода (отладка)"):
+        if not st.session_state["debug_last_turn"]:
+            st.caption("Пока пусто.")
+        else:
+            for line in st.session_state["debug_last_turn"]:
+                st.markdown(line)
+                st.divider()
 
 with chat_col:
     st.subheader(f"Сцена: день {w.day}/{w.max_days}")
@@ -806,7 +932,7 @@ with chat_col:
     with cA:
         chat_height = st.slider("Высота ленты", 350, 900, 650, 50, key="chat_height")
     with cB:
-        render_last = st.slider("Сообщений в ленте", 30, 400, 160, 10, key="render_last")
+        render_last = st.slider("Сообщений в ленте", 20, 200, 80, 10, key="render_last")
     with cC:
         if st.button("⬇️ Вниз к последнему", use_container_width=True):
             st.rerun()
@@ -841,19 +967,19 @@ with chat_col:
     st.caption(PLAYER_ACTIONS_RU[choice]["desc"])
     bullets, disclaimer = preview_effect_ru(choice)
     st.markdown('<div class="preview-card">', unsafe_allow_html=True)
-    st.markdown("**Превью эффекта (чтобы понимать выбор):**\n\n" + bullets)
+    st.markdown("**Превью эффекта:**\n\n" + bullets)
     st.markdown(f"<span style='opacity:0.8; font-size: 0.85rem;'>{disclaimer}</span>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
     b1, b2 = st.columns([1, 1])
 
     def apply_turn(player_action: str):
-        before = snapshot_world(w)
-        ending = step_world(w, player_action)
-        after = snapshot_world(w)
+        # 1) show player line (CRPG style)
+        w.push("player", PLAYER_ACTIONS_RU.get(player_action, {"title": player_action}).get("title", player_action))
 
-        # Push explicit Δ report into the log (so player learns causality)
-        w.push("system", make_delta_report(before, after, player_action))
+        # 2) simulate internally and write ONE narrator message
+        ending, debug_lines = step_world_compact(w, player_action)
+        st.session_state["debug_last_turn"] = debug_lines
 
         if ending:
             st.session_state["ending"] = ending
