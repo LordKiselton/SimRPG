@@ -1,4 +1,6 @@
 # game.py
+# MVP: "Стабилизировать город" — главный win condition.
+#
 # Run:
 #   pip install streamlit pandas
 #   streamlit run game.py
@@ -29,9 +31,9 @@ import streamlit as st
 Role = Literal["narrator", "player", "world", "system"]
 
 ROLE_TO_CHAT = {
-    "narrator": "assistant",  # ведущий / хроникёр
-    "world": "assistant",     # мир/город
-    "system": "assistant",    # системные подсказки (в этой версии в чат почти не пишем)
+    "narrator": "assistant",
+    "world": "assistant",
+    "system": "assistant",
     "player": "user",
 }
 
@@ -72,33 +74,39 @@ class World:
     day: int = 1
     max_days: int = 7
 
+    # City pressures
     economic_stress: int = 40
     public_fear: int = 30
-    magical_tension: int = 50
+    magical_tension: int = 50  # social/political conflict around magic (NOT "safety")
+
+    # Narrative track (lightweight, still helps cohesion)
+    ship_progress: int = 0  # 0..4
+    ship_target: int = 4
+    ship_suspect: str = "unknown"  # lodge/mages/merchants/accident (hidden truth, used for flavor/rare effects)
+    ship_revealed: bool = False
 
     factions: Dict[str, Faction] = field(default_factory=dict)
     log: List[Message] = field(default_factory=list)
 
-    crisis_truth: str = "unknown"  # lodge/mages/merchants/accident
-
-    # buffer for "1 choice -> 1 narrator answer"
+    # Buffer: to produce 1 narrator reply per turn
     buffer_mode: bool = False
-    _buffer: List[Tuple[Role, str]] = field(default_factory=list)
+    _buffer: List[str] = field(default_factory=list)
 
     def rng(self) -> random.Random:
+        # deterministic per day
         return random.Random(self.seed + self.day * 999)
 
     def clamp(self):
         self.economic_stress = int(max(0, min(100, self.economic_stress)))
         self.public_fear = int(max(0, min(100, self.public_fear)))
         self.magical_tension = int(max(0, min(100, self.magical_tension)))
+        self.ship_progress = int(max(0, min(self.ship_target, self.ship_progress)))
         for f in self.factions.values():
             f.clamp()
 
     def push(self, role: Role, text: str):
-        # When buffering, we don't spam the chat; we collect and later render one summary.
         if self.buffer_mode:
-            self._buffer.append((role, text))
+            self._buffer.append(text)
         else:
             self.log.append(Message(role=role, content=text))
 
@@ -106,7 +114,7 @@ class World:
         self.buffer_mode = True
         self._buffer = []
 
-    def buffer_end(self) -> List[Tuple[Role, str]]:
+    def buffer_end(self) -> List[str]:
         self.buffer_mode = False
         buf = self._buffer[:]
         self._buffer = []
@@ -184,7 +192,7 @@ DAY_NAME = {
     4: "День четвёртый — «Окно возможностей»",
     5: "День пятый — «Искры над доками»",
     6: "День шестой — «Грань»",
-    7: "День седьмой — «Приговор города»",
+    7: "День седьмой — «Проверка на прочность»",
 }
 
 
@@ -192,181 +200,265 @@ def day_title(d: int) -> str:
     return DAY_NAME.get(d, f"День {d}")
 
 
-PLAYER_ACTIONS_RU = {
-    "investigate": {
-        "title": "Расследовать исчезновение корабля",
-        "desc": "Собрать слухи, осмотреть доки, надавить на свидетелей. Ты ищешь правду — или хотя бы правдоподобную версию.",
-    },
-    "support_temple": {
-        "title": "Поддержать Храм Пламени публично",
-        "desc": "Ты говоришь о порядке и очищении. Толпа слушает. Маги мрачнеют.",
-    },
-    "support_mages": {
-        "title": "Встать на защиту Магического Круга",
-        "desc": "Ты защищаешь магов от обвинений и истерии. Храм воспринимает это как вызов.",
-    },
-    "support_merchants": {
-        "title": "Помочь Торговой гильдии восстановить поставки",
-        "desc": "Ты ищешь обходные пути, убеждаешь, покупаешь, договариваешься. Город любит тех, кто тушит пожар голода.",
-    },
-    "spread_rumour": {
-        "title": "Запустить слухи против выбранной силы",
-        "desc": "Немного шёпота — и репутация трещит. Но страх в городе тоже растёт.",
-    },
-    "bribe": {
-        "title": "Подкупить посредников",
-        "desc": "Деньги любят тишину. Ты покупаешь доступ, лояльность и закрытые двери.",
-    },
-    "noop": {
-        "title": "Промолчать и наблюдать",
-        "desc": "Иногда бездействие — тоже действие. Но город не любит пустоты: её заполняют другие.",
-    },
-}
-
-
 # -----------------------------
-# World init / step
+# Win condition (primary)
 # -----------------------------
 
-def init_world_from_df(df: pd.DataFrame, seed: int, max_days: int) -> World:
-    w = World(seed=seed, max_days=max_days)
-    w.factions = df_to_factions(df)
+STABLE_THRESH_ECON = 55
+STABLE_THRESH_FEAR = 55
+STABLE_THRESH_MAGIC = 60  # conflict around magic, keep moderate
 
-    r = random.Random(seed)
-    w.crisis_truth = r.choices(
-        ["lodge", "mages", "merchants", "accident"],
-        weights=[30, 30, 20, 20],
-        k=1
-    )[0]
+def stability_score(w: World) -> int:
+    # higher is better; 0..100-ish
+    # penalize overshoots
+    score = 100
+    score -= max(0, w.economic_stress - STABLE_THRESH_ECON) * 2
+    score -= max(0, w.public_fear - STABLE_THRESH_FEAR) * 2
+    score -= max(0, w.magical_tension - STABLE_THRESH_MAGIC) * 2
+    return int(max(0, min(100, score)))
 
-    w.log = []
-    w.day = 1
-
-    w.economic_stress = 40
-    w.public_fear = 30
-    w.magical_tension = 50
-
-    w.push(
-        "narrator",
-        f"**{day_title(1)}**\n\n"
-        "В гавани Нериссы пропадает корабль с *астральным углём* — топливом для портовых механизмов и городской машинерии. "
-        "Цены взлетают, лавки закрываются раньше, а у костров обсуждают одно и то же: **кто виноват и кому выгодно**."
+def stable_today(w: World) -> bool:
+    return (
+        w.economic_stress <= STABLE_THRESH_ECON
+        and w.public_fear <= STABLE_THRESH_FEAR
+        and w.magical_tension <= STABLE_THRESH_MAGIC
     )
 
-    w.economic_stress += 20
-    w.public_fear += 15
-    if "Mages" in w.factions:
-        w.factions["Mages"].stability -= 10
-        w.push("world", f"Слухи прежде всего бьют по {fr('Mages')}: «опять их печати, их ритуалы, их высокомерие».")
-    w.clamp()
-    return w
 
+# -----------------------------
+# Intents & dynamics
+# -----------------------------
 
 def compute_effective_power(f: Faction) -> int:
     return int((f.resources * 0.5 + f.power * 0.5) * (0.5 + f.stability / 200.0))
 
+def leader_faction(w: World) -> Tuple[str, int]:
+    best = ("", -1)
+    for f in w.factions.values():
+        p = compute_effective_power(f)
+        if p > best[1]:
+            best = (f.name, p)
+    return best
 
 def faction_intent(w: World, f: Faction) -> str:
+    # Intents tuned to "city pressure" logic
     if w.economic_stress > 70 and f.name == "Merchants":
         return "law"
-    if w.magical_tension > 70 and f.name == "Temple":
-        return "propaganda"
+    if w.public_fear > 70 and f.name in ("Temple", "Lodge"):
+        return "sabotage"
     if f.stability < 35 and f.name == "Mages":
         return "aid"
-    if w.public_fear > 70 and f.name in ("Lodge", "Temple"):
-        return "sabotage"
+    if w.magical_tension > 70 and f.name == "Temple":
+        return "propaganda"
     return "propaganda"
-
 
 def intent_title_ru(intent: str) -> str:
     return {
-        "law": "давит решениями",
+        "law": "двигает решения",
         "propaganda": "раскачивает мнение",
-        "aid": "чинит внутренний порядок",
-        "sabotage": "бьёт исподтишка",
+        "aid": "успокаивает своих",
+        "sabotage": "подливает масла",
     }.get(intent, "выжидает")
-
 
 def intent_reason_ru(w: World, f: Faction, intent: str) -> str:
     if intent == "law" and f.name == "Merchants":
-        return f"экономический стресс высокий ({w.economic_stress})"
-    if intent == "propaganda" and f.name == "Temple" and w.magical_tension > 70:
-        return f"напряжение магии высокое ({w.magical_tension})"
-    if intent == "aid" and f.name == "Mages":
-        return f"стабильность низкая ({f.stability})"
+        return f"рынок перегрет ({w.economic_stress})"
     if intent == "sabotage":
         return f"страх на улицах высокий ({w.public_fear})"
+    if intent == "aid" and f.name == "Mages":
+        return f"их порядок шатается ({f.stability})"
+    if intent == "propaganda" and f.name == "Temple" and w.magical_tension > 70:
+        return f"конфликт вокруг магии растёт ({w.magical_tension})"
     if intent == "propaganda":
-        return "борьба за влияние (обычный ход)"
-    return "нет явного триггера"
+        return "борьба за влияние"
+    return "контекст слабый"
 
 
-def apply_player_action(w: World, action: str) -> str:
+# -----------------------------
+# Player action modes (simplified UI)
+# -----------------------------
+
+MODE_LIST = ["Стабилизация", "Влияние", "Тайные меры", "Ожидание", "Расследование (корабль)"]
+
+MODE_DESC = {
+    "Стабилизация": "Быстрые меры по городу: цены, патрули, переговоры. Сильнее всего влияет на 3 показателя давления.",
+    "Влияние": "Открытая работа с выбранной фракцией: поддержка или давление (в пределах городской легитимности).",
+    "Тайные меры": "Подкуп или слухи против выбранной фракции. Дает контроль, но повышает риск деградации атмосферы.",
+    "Ожидание": "Ничего не делать. Город и фракции сыграют без тебя.",
+    "Расследование (корабль)": "Двигает сюжет и дает редкие рычаги: снижает страх и может открыть спец-меру.",
+}
+
+SECRET_OPS = ["Подкупить", "Пустить слухи"]
+INFLUENCE_OPS = ["Поддержать", "Надавить"]
+
+def faction_choices(w: World) -> List[str]:
+    # show as RU names but keep mapping
+    return list(w.factions.keys())
+
+
+# -----------------------------
+# Effects: player actions
+# -----------------------------
+
+def apply_player_mode(w: World, mode: str, target: Optional[str], subop: Optional[str]) -> str:
     rng = w.rng()
 
-    if action == "noop":
+    if mode == "Ожидание":
         w.public_fear += 1
-        return ("Ты выбираешь молчание. В переулках это читают по-разному: "
-                "кто-то видит осторожность, кто-то — слабость. Город продолжает двигаться без тебя.")
+        return "Ты отступаешь на шаг и смотришь, как город сам выбирает траекторию. Пустоту мгновенно заполняют чужие решения."
 
-    if action == "investigate":
-        w.public_fear -= 4
-        if w.crisis_truth == "lodge" and "Lodge" in w.factions:
-            w.factions["Lodge"].stability -= 6
-            return ("Ты обходишь причалы, говоришь с докерами и портовыми писарями. "
-                    "Кто-то видел **маски** у маяка, кто-то — тень без фонаря. "
-                    f"След ведёт к {fr('Lodge')} (−6 к стабильности).")
-        if w.crisis_truth == "mages" and "Mages" in w.factions:
-            w.factions["Mages"].stability -= 4
-            w.magical_tension += 6
-            return ("Ты находишь на обрывках паруса следы **сигилов** — слишком чистых для случайности. "
-                    f"Подозрение падает на {fr('Mages')}, и город сжимает кулаки (напряжение магии +6).")
-        if w.crisis_truth == "merchants" and "Merchants" in w.factions:
-            w.factions["Merchants"].power -= 4
-            w.factions["Merchants"].resources -= 6
-            return ("Тебе попадается книга страховок: цифры сходятся слишком красиво. "
-                    f"Слишком удобно для {fr('Merchants')}. Их версия трещит (−4 влияние, −6 ресурсы).")
-        w.economic_stress -= 3
-        return ("Портовый староста показывает карты и журнал ветров: шторм, неверные лоции, человеческая ошибка. "
-                "Город чуть выдыхает (экономический стресс −3).")
+    if mode == "Стабилизация":
+        # Directly targets pressures, mild political tradeoffs
+        # Choose a "package" based on current biggest problem (auto, no UI)
+        pressures = [("экономика", w.economic_stress), ("страх", w.public_fear), ("магия", w.magical_tension)]
+        pressures.sort(key=lambda x: x[1], reverse=True)
+        top = pressures[0][0]
 
-    if action == "support_temple" and "Temple" in w.factions and "Mages" in w.factions:
-        w.factions["Temple"].power += 6
-        w.magical_tension += 5
-        w.factions["Mages"].stability -= 3
-        return ("Ты выступаешь на площади: «порядок важнее гордыни». "
-                f"{fr('Temple')} поднимает знамёна (+6 влияние), но магический воздух густеет (напряжение +5).")
+        if top == "экономика":
+            w.economic_stress -= 10
+            w.public_fear -= 2
+            if "Merchants" in w.factions:
+                w.factions["Merchants"].resources -= 3  # concessions
+                w.factions["Merchants"].power -= 1
+            return ("Ты вводишь временные меры: коридор цен, приоритетные поставки, контроль на пристанях. "
+                    "Рынок выдыхает, а люди впервые за дни говорят не только о голоде.")
+        if top == "страх":
+            w.public_fear -= 10
+            w.economic_stress -= 2
+            if "Council" in w.factions:
+                w.factions["Council"].power += 2
+            return ("Ты усиливаешь патрули и проводишь публичные переговоры с лидерами кварталов. "
+                    "Толпа перестаёт быть зверем — хотя бы на ночь.")
+        # magic conflict
+        w.magical_tension -= 10
+        w.public_fear -= 2
+        if "Temple" in w.factions:
+            w.factions["Temple"].radicalization -= 2
+        if "Mages" in w.factions:
+            w.factions["Mages"].stability += 2
+        return ("Ты собираешь Храм и Круг за одним столом, заставляя их говорить языком правил, а не обвинений. "
+                "Конфликт вокруг магии отступает, но осадок в речах остаётся.")
 
-    if action == "support_mages" and "Mages" in w.factions and "Temple" in w.factions:
-        w.factions["Mages"].stability += 6
-        w.magical_tension -= 4
-        w.factions["Temple"].radicalization += 4
-        return ("Ты гасишь истерию и защищаешь магов от линчевания. "
-                f"{fr('Mages')} держится увереннее (+6 стабильность), но {fr('Temple')} озлобляется (+4 радикализация).")
+    if mode == "Влияние":
+        if not target or target not in w.factions:
+            return "Ты пытаешься давить на воздух — но у города нет адресата."
+        f = w.factions[target]
+        if subop == "Поддержать":
+            # Support helps their stability/power, but also shifts pressures depending on faction
+            f.power += 5
+            f.stability += 3
+            f.rel_player += 4
 
-    if action == "support_merchants" and "Merchants" in w.factions and "Council" in w.factions:
-        w.factions["Merchants"].resources += 6
-        w.economic_stress -= 5
-        w.factions["Council"].power -= 2
-        return ("Ты находишь обходные цепочки поставок и уговариваешь нужных людей. "
-                f"Стресс рынка падает (−5), {fr('Merchants')} богатеет (+6 ресурсы), Совет выглядит слабее (−2 влияние).")
+            if target == "Temple":
+                # Better: Temple support reduces fear (order), increases magic conflict (rhetoric)
+                w.public_fear -= 3
+                w.magical_tension += 4
+                f.radicalization += 2
+                return ("Ты выходишь рядом с пламенными знаменами: обещаешь порядок и ясные запреты. "
+                        "Люди чувствуют опору — но спор о магии становится громче.")
+            if target == "Mages":
+                w.magical_tension -= 3
+                w.public_fear -= 1
+                return ("Ты защищаешь Круг от истерии и требуешь процедур вместо казней. "
+                        "В воздухе меньше злобы — но город внимательно смотрит на каждый новый ритуал.")
+            if target == "Merchants":
+                w.economic_stress -= 3
+                w.public_fear -= 1
+                return ("Ты легализуешь быстрые сделки и даёшь гильдии коридор для действий. "
+                        "Прилавки оживают — но кто-то шепчет, что город продают по частям.")
+            if target == "Council":
+                w.public_fear -= 2
+                w.economic_stress -= 1
+                return ("Ты усиливаешь легитимность Совета: открытые заседания, отчёты, ответственность. "
+                        "Люди меньше боятся неизвестного.")
+            if target == "Lodge":
+                w.public_fear += 3
+                w.economic_stress += 1
+                return ("Ты играешь с тенью — и тень отвечает. Связи открываются, но на улицах становится тревожнее.")
+            return "Ты выбираешь сторону — и город делает пометку напротив твоего имени."
 
-    if action == "spread_rumour":
-        target = rng.choice(list(w.factions.values()))
-        target.power -= 4
-        w.public_fear += 3
-        return (f"Ты шепчешь нужным ушам: «{fr(target.name)} скрывает правду». "
-                f"Их влияние падает (−4), но страх в городе растёт (+3).")
+        # Pressure / crackdown
+        if subop == "Надавить":
+            # Pressure reduces power, increases instability; can reduce some pressures if applied to right faction
+            f.power -= 5
+            f.stability -= 3
+            f.rel_player -= 4
+            w.public_fear += 1  # конфликтность
 
-    if action == "bribe":
-        target = rng.choice(list(w.factions.values()))
-        target.rel_player += 8
-        target.resources -= 3
-        return (f"Ты платишь тихо и без свидетелей. "
-                f"Люди {fr(target.name)} начинают узнавать тебя по шагам (+8 отношения).")
+            if target == "Lodge":
+                w.public_fear -= 4  # cutting fear network
+                return ("Ты прижимаешь тех, кто любит шептать в темноте: облавы, аресты посредников, контроль таверн. "
+                        "Улицы выдыхают — но Ложа запоминает такие ходы.")
+            if target == "Merchants":
+                w.economic_stress += 2  # рынок обижается
+                return ("Ты давишь на гильдию: проверки, тарифы, показательные штрафы. "
+                        "Люди радуются справедливости — но рынок реагирует сухо и больно.")
+            if target == "Temple":
+                w.magical_tension -= 2  # меньше риторики
+                return ("Ты ограничиваешь пламенные проповеди и требуешь умеренности. "
+                        "Спор о магии становится тише — зато на площади появляется холодный гнев.")
+            if target == "Mages":
+                w.magical_tension += 2
+                return ("Ты заставляешь Круг жить по новым правилам и отчётности. "
+                        "Город чувствует контроль — но маги воспринимают это как унижение.")
+            if target == "Council":
+                w.public_fear += 2
+                return ("Ты демонстративно принижаешь Совет, снимая с него полномочия. "
+                        "Люди мгновенно чувствуют вакуум власти.")
+            return "Ты нажимаешь сильнее — и слышишь, как трещит чья-то опора."
+
+    if mode == "Тайные меры":
+        if not target or target not in w.factions or not subop:
+            return "Тайные меры требуют адресата и способа."
+        f = w.factions[target]
+
+        if subop == "Подкупить":
+            f.rel_player += 10
+            f.resources -= 4
+            w.public_fear += 1  # коррупционный фон
+            return ("Ты платишь аккуратно: без свидетелей и лишних слов. "
+                    "Двери открываются быстрее — но город начинает пахнуть деньгами, а не законом.")
+
+        if subop == "Пустить слухи":
+            f.power -= 6
+            f.stability -= 2
+            w.public_fear += 3
+            return ("Ты запускаешь шёпот ровно туда, где он превращается в уверенность. "
+                    "Чужое влияние трескается — но страх на улицах растёт.")
+
+    if mode == "Расследование (корабль)":
+        # Guaranteed progress so it's never "wasted"
+        w.ship_progress += 1
+        w.public_fear -= 3  # people feel someone is working
+        # Rare targeted consequence based on hidden truth — small, not required for win condition
+        if w.ship_progress >= w.ship_target:
+            w.ship_revealed = True
+        if w.ship_suspect == "lodge" and "Lodge" in w.factions:
+            w.factions["Lodge"].stability -= 2
+        elif w.ship_suspect == "mages" and "Mages" in w.factions:
+            w.magical_tension += 2
+        elif w.ship_suspect == "merchants" and "Merchants" in w.factions:
+            w.factions["Merchants"].resources -= 2
+        else:
+            w.economic_stress -= 1
+
+        # A small "special lever" unlocked mid-track: once per run, investigation can give a stabilizing bonus
+        if w.ship_progress == 2:
+            w.economic_stress -= 2
+            return ("Ты находишь связку документов по маршрутам и складским ключам. "
+                    "Это не раскрывает виновника, но снимает часть напряжения на рынке. По городу проходит тихий выдох.")
+        if w.ship_progress == 4:
+            return ("Точки сходятся. Карта ветров, подписи, ночные свидетели — теперь у тебя есть цельная версия. "
+                    "Главное — удержать город от срыва, пока правда не превратится в новую искру.")
+        return ("Ты собираешь показания и сверяешь следы: меньше пафоса, больше фактов. "
+                "Когда кто-то работает, паника уходит в тень.")
 
     return "Ты делаешь шаг — и город отвечает."
 
+
+# -----------------------------
+# Effects: factions & escalations
+# -----------------------------
 
 def apply_faction_action(w: World, actor: Faction, intent: str) -> str:
     rng = w.rng()
@@ -377,126 +469,149 @@ def apply_faction_action(w: World, actor: Faction, intent: str) -> str:
         delta = rng.randint(2, 6)
         actor.power += delta
         actor.radicalization += 1
+
         if actor.name == "Temple":
-            w.magical_tension += 3
-            return (f"{fr(actor.name)} раздувает костры и речи: «магия — искушение». "
-                    f"Их влияние растёт (+{delta}), а напряжение магии усиливается (+3).")
+            # Temple propaganda increases social conflict about magic
+            w.magical_tension += 2
+            w.public_fear += 1
+            return f"{fr(actor.name)} раздувает спор о магии и порядке."
         if actor.name == "Lodge":
-            w.public_fear += 3
-            return (f"{fr(actor.name)} запускает страх в подворотни: «ночью лучше не выходить». "
-                    f"Их влияние растёт (+{delta}), страх +3.")
-        return (f"{fr(actor.name)} ведёт кампанию в городе: плакаты, слухи, обещания. "
-                f"Их влияние растёт (+{delta}).")
+            w.public_fear += 2
+            return f"{fr(actor.name)} подкармливает тревогу тихими слухами."
+        if actor.name == "Merchants":
+            w.economic_stress -= 1
+            return f"{fr(actor.name)} обещает поставки и стабильные цены."
+        if actor.name == "Council":
+            w.public_fear -= 1
+            return f"{fr(actor.name)} показывает людям процесс и ответственность."
+        if actor.name == "Mages":
+            w.magical_tension -= 1
+            return f"{fr(actor.name)} выступает за протоколы и безопасность ритуалов."
+        return f"{fr(actor.name)} работает на своё влияние."
 
     if intent == "sabotage" and target:
-        dmg = rng.randint(3, 8)
+        dmg = rng.randint(3, 7)
         target.stability -= dmg
-        target.resources -= rng.randint(1, 5)
-        w.public_fear += 4
-        if rng.random() < 0.2:
-            actor.power -= 5
-            return (f"{fr(actor.name)} пытается ударить по {fr(target.name)} исподтишка (−{dmg} стабильность), "
-                    "но следы всплывают (−5 влияние у инициатора).")
-        return (f"{fr(actor.name)} подрывает позиции {fr(target.name)}: срыв поставок, подкуп свидетеля, ночной пожар. "
-                f"{fr(target.name)} теряет устойчивость (−{dmg}). Страх +4.")
+        w.public_fear += 3
+        w.economic_stress += 1
+        actor.power += 1  # fear feeds manipulators
+        return f"Кто-то бьёт по слабым местам {fr(target.name)} — и город вздрагивает."
 
     if intent == "aid":
-        actor.stability += 8
-        actor.resources -= 3
-        return (f"{fr(actor.name)} тушит внутренние пожары: дисциплина, охрана, контроль ритуалов. "
-                f"+8 стабильности, но это стоит денег (−3 ресурсы).")
+        actor.stability += 7
+        actor.resources -= 2
+        w.magical_tension -= 1 if actor.name == "Mages" else 0
+        return f"{fr(actor.name)} тушит внутренние пожары."
 
     if intent == "law":
+        # market emergency response
         if actor.name == "Merchants":
-            w.economic_stress -= 8
-            actor.power += 3
-            return (f"{fr(actor.name)} проталкивает чрезвычайные тарифы и новые маршруты. "
-                    f"Стресс рынка −8, их влияние +3.")
-        if actor.name == "Temple":
-            w.magical_tension -= 5
-            actor.power += 3
-            return (f"{fr(actor.name)} добивается ограничений на магические практики. "
-                    f"Напряжение магии −5, их влияние +3.")
-        w.public_fear -= 3
-        return f"{fr(actor.name)} проводит успокоительный указ: страх −3."
+            w.economic_stress -= 6
+            actor.power += 2
+            actor.resources -= 1
+            return f"{fr(actor.name)} вводит новые маршруты и режим снабжения."
+        w.public_fear -= 1
+        return f"{fr(actor.name)} проводит успокоительные меры."
 
-    return f"{fr(actor.name)} выжидает, считая ходы."
+    return f"{fr(actor.name)} выжидает."
 
 
 def system_escalations(w: World) -> List[str]:
+    """
+    IMPORTANT CHANGE:
+    Magical accident is about *unsafe magic under stress*, not merely 'conflict around magic'.
+    So it depends on:
+      - magical_tension high (society heated)
+      - Mages stability low (unsafe conditions)
+      - and Temple power LOW (less 'control') OR fear high (mob pressure)
+    """
     out: List[str] = []
     rng = w.rng()
 
     mages = w.factions.get("Mages")
-    if mages and w.magical_tension > 75 and mages.stability < 35 and rng.random() < 0.35:
-        out.append("Над доками вспыхивает рваная вспышка: ритуал срывается, железо плавится, люди кричат. "
-                   "Город запоминает такие ночи надолго.")
-        w.public_fear += 12
-        w.economic_stress += 8
-        mages.power -= 10
-        mages.stability -= 10
+    temple = w.factions.get("Temple")
 
-    if w.public_fear > 80 and rng.random() < 0.30:
-        out.append("Толпа становится зверем: витрины летят, стража отвечает дубинками, кто-то поджигает лавку. "
-                   "После такого город просыпается другим.")
-        w.economic_stress += 10
-        w.public_fear += 5
+    # Magical accident risk (more coherent)
+    if mages:
+        control_factor = 0
+        if temple:
+            control_factor = max(0, 60 - temple.power)  # stronger Temple -> more control -> lower risk
+        risk = 0
+        if w.magical_tension > 72:
+            risk += (w.magical_tension - 72)
+        if mages.stability < 45:
+            risk += (45 - mages.stability) * 2
+        if w.public_fear > 70:
+            risk += (w.public_fear - 70)
+        risk += control_factor // 3
+
+        # convert risk to chance
+        chance = min(0.55, max(0.0, risk / 180.0))
+        if chance > 0 and rng.random() < chance:
+            out.append("Над доками срывается ритуал: искры режут туман, металл воет, люди разбегаются. "
+                       "Это не ‘магия плоха’, это **магия под давлением**.")
+            w.public_fear += 8
+            w.economic_stress += 6
+            mages.stability -= 8
+            mages.power -= 4
+
+    # Riot risk (unchanged idea, clearer impact)
+    if w.public_fear > 82 and rng.random() < 0.30:
+        out.append("Толпа рвёт витрины и цепляется за стражу. Ночь проходит в криках — утром город платит по счетам.")
+        w.economic_stress += 9
+        w.public_fear += 3
         if "Council" in w.factions:
-            w.factions["Council"].power -= 5
+            w.factions["Council"].power -= 4
         if "Temple" in w.factions:
-            w.factions["Temple"].power += 3
+            w.factions["Temple"].power += 2
 
-    if w.day in (3, 5) and rng.random() < 0.6:
-        clue = {
-            "lodge": "У маяка кто-то видел людей в масках: без фонаря, но уверенно, будто дорога им знакома.",
-            "mages": "На обрывке паруса остаётся чистый след сигила — слишком точный, чтобы быть случайным.",
-            "merchants": "В книге страховок мелькают одинаковые подписи — как будто кто-то заранее ждал пропажи.",
-            "accident": "Журнал ветров говорит о внезапном шквале. Слишком резком для сезона."
-        }[w.crisis_truth]
-        out.append(f"Улика: {clue}")
+    # Story beats about the ship so it doesn't vanish
+    if w.day in (2, 4, 6):
+        if w.ship_progress >= 1:
+            out.append("По делу корабля: кто-то ‘случайно’ путается в показаниях. Значит, нервы настоящие.")
+        else:
+            out.append("По делу корабля: на пристанях снова спорят о виновнике — без фактов страх всегда громче.")
 
     return out
 
 
-def check_ending(w: World) -> Optional[str]:
-    temple = w.factions.get("Temple")
-    merchants = w.factions.get("Merchants")
-    mages = w.factions.get("Mages")
-    lodge = w.factions.get("Lodge")
-    council = w.factions.get("Council")
+# -----------------------------
+# Endings: stabilization is primary
+# -----------------------------
 
-    if mages and w.magical_tension > 85 and mages.stability < 25:
-        return ("**Арканная катастрофа.**\n\nДоковая линия горит фиолетовым пламенем, механизмы молчат, "
-                "а улицы шепчут только одно слово: «магия». Храм требует чрезвычайной власти — и получает её.")
+def ending_text(w: World) -> str:
+    # Primary win
+    if stable_today(w) and w.day > w.max_days:
+        return ("**ПОБЕДА: город удержан.**\n\n"
+                "Неделя прошла без окончательного срыва. Рынок не рухнул, толпа не стала зверем, спор о магии не взорвал доки. "
+                "Нерисса запомнит эту неделю как ‘пепельную’ — но не как ‘похоронную’.\n\n"
+                f"**Итоговая устойчивость:** {stability_score(w)}/100.")
 
-    if temple and temple.radicalization > 75 and w.public_fear > 65 and temple.power > 70:
-        return ("**Теократия.**\n\nХрам Пламени объявляет город священной территорией, вводит запреты и караулы. "
-                "Магия — вне закона. Спокойствие приходит, но оно пахнет дымом.")
-
-    if merchants and merchants.power > 78 and w.economic_stress < 45:
-        return ("**Торговый протекторат.**\n\nРынок стабилизируется, хлеб возвращается на прилавки, "
-                "но город начинает измерять людей монетой. Власть переходит к тем, кто держит склады.")
-
-    if lodge and lodge.power > 60 and w.public_fear > 70:
-        return ("**Теневая регентура.**\n\nСтрах становится валютой. Правда — роскошью. "
-                "В городе тихо, потому что каждый боится сказать лишнее.")
-
-    if council and council.power > 60 and w.public_fear < 55 and w.economic_stress < 55:
-        return ("**Гражданская реформа.**\n\nСовет собирает фракции за одним столом. "
-                "Компромисс хрупок, но город впервые за долгое время дышит свободнее.")
-
-    return None
+    # If not stable: describe dominant failure
+    if w.public_fear > 80:
+        return ("**ПОРАЖЕНИЕ: город сорвался в страх.**\n\n"
+                "Паника победила институты. Когда люди боятся, они ищут не решение, а врага — и находят его.")
+    if w.economic_stress > 75:
+        return ("**ПОРАЖЕНИЕ: рынок сломался.**\n\n"
+                "Цены и дефицит победили обещания. Голод — самый быстрый политический аргумент.")
+    if w.magical_tension > 80:
+        return ("**ПОРАЖЕНИЕ: конфликт вокруг магии стал точкой разлома.**\n\n"
+                "Даже без катастрофы город начал жить в режиме ‘мы и они’. А это всегда дороже любой аварии.")
+    return ("**НЕУДАЧА: неделя прошла на грани.**\n\n"
+            "Решающих провалов не случилось, но и стабилизации нет. В Нериссе всё ещё слишком много пороха.")
 
 
 # -----------------------------
-# Explainability (snapshots, deltas, previews)
+# Compact turn narration (1 choice -> 1 narrator reply)
 # -----------------------------
 
 def snapshot_world(w: World) -> dict:
     return {
+        "day": w.day,
         "economic_stress": w.economic_stress,
         "public_fear": w.public_fear,
         "magical_tension": w.magical_tension,
+        "ship_progress": w.ship_progress,
         "factions": {
             name: {
                 "power": f.power,
@@ -509,10 +624,8 @@ def snapshot_world(w: World) -> dict:
         }
     }
 
-
 def fmt_delta(x: int) -> str:
     return f"+{x}" if x > 0 else str(x)
-
 
 def top_faction_changes(before: dict, after: dict, top_n: int = 2):
     changes = []
@@ -523,8 +636,8 @@ def top_faction_changes(before: dict, after: dict, top_n: int = 2):
         score = (
             abs(a["power"] - b["power"]) +
             abs(a["stability"] - b["stability"]) +
-            abs(a["radicalization"] - b["radicalization"]) +
             abs(a["resources"] - b["resources"]) +
+            abs(a["radicalization"] - b["radicalization"]) +
             abs(a["rel_player"] - b["rel_player"])
         )
         if score > 0:
@@ -532,235 +645,176 @@ def top_faction_changes(before: dict, after: dict, top_n: int = 2):
     changes.sort(reverse=True, key=lambda t: t[0])
     return changes[:top_n]
 
-
-def preview_effect_ru(action: str) -> Tuple[str, str]:
-    if action == "investigate":
-        return (
-            "- Ожидаемо: **Страх ↓**, иногда **Экономика ↓**\n"
-            "- Возможный эффект: удар по одной из фракций (если нашёл след)\n"
-            "- Риск: если улика указывает на магов — **Магия ↑**",
-            "Превью приблизительное: итог зависит от скрытой причины кризиса и текущих порогов."
-        )
-    if action == "support_temple":
-        return (
-            "- Ожидаемо: **Храм ↑**, **Магия ↑**\n"
-            "- Побочный эффект: **стабильность магов ↓**",
-            "Превью приблизительное: при высоком страхе цепочки реакций могут усилиться."
-        )
-    if action == "support_mages":
-        return (
-            "- Ожидаемо: **стабильность магов ↑**, **Магия ↓**\n"
-            "- Побочный эффект: **радикализация Храма ↑**",
-            "Превью приблизительное: при высоком страхе возможны неприятные эскалации независимо от выбора."
-        )
-    if action == "support_merchants":
-        return (
-            "- Ожидаемо: **Экономика ↓**, **ресурсы Торговцев ↑**\n"
-            "- Побочный эффект: **влияние Совета ↓**",
-            "Превью приблизительное: если рынок уже горит, эффект будет ощущаться сильнее."
-        )
-    if action == "spread_rumour":
-        return (
-            "- Ожидаемо: **влияние цели ↓**, **Страх ↑**\n"
-            "- Хорошо для: раскачки политического баланса\n"
-            "- Плохо для: стабильности города",
-            "Превью приблизительное: цель выбирается контекстно (в этой версии — случайно)."
-        )
-    if action == "bribe":
-        return (
-            "- Ожидаемо: **отношение выбранной силы к тебе ↑**\n"
-            "- Цена: **её ресурсы ↓**",
-            "Превью приблизительное: цель выбирается контекстно (в этой версии — случайно)."
-        )
-    if action == "noop":
-        return (
-            "- Ожидаемо: **Страх слегка ↑**\n"
-            "- Остальное: город и фракции “сыграют без тебя”",
-            "Превью приблизительное: если параметры близко к порогам, события могут резко эскалировать."
-        )
-    return ("- Ожидаемо: эффект зависит от контекста", "Превью приблизительное.")
-
-
-def narrate_delta_and_changes(before: dict, after: dict) -> Tuple[str, str]:
+def narrate_summary(before: dict, after: dict) -> Tuple[str, str, str]:
     ge = after["economic_stress"] - before["economic_stress"]
     gf = after["public_fear"] - before["public_fear"]
     gm = after["magical_tension"] - before["magical_tension"]
-
-    # One-line numeric summary
-    delta_line = (
-        f"**Итог:** Экономика {fmt_delta(ge)}, Страх {fmt_delta(gf)}, Магия {fmt_delta(gm)}."
-    )
-
-    # One or two biggest faction movements, in natural language
-    top = top_faction_changes(before, after, top_n=2)
-    if not top:
-        return delta_line, "Во фракциях заметных сдвигов не видно — но это тоже сигнал: все затаились."
-
-    phrases = []
-    for _, name, b, a in top:
-        # pick 1-2 strongest deltas for phrasing
-        deltas = []
-        for key, ru in [("power", "влияние"), ("stability", "устойчивость"), ("radicalization", "радикализация"), ("resources", "ресурсы")]:
-            d = a[key] - b[key]
-            if d != 0:
-                deltas.append((abs(d), d, ru))
-        deltas.sort(reverse=True, key=lambda t: t[0])
-        deltas = deltas[:2]
-
-        if not deltas:
-            continue
-
+    delta_line = f"**Итог:** Экономика {fmt_delta(ge)}, Страх {fmt_delta(gf)}, Спор о магии {fmt_delta(gm)}."
+    stable = f"**Устойчивость:** {stability_score_from_snapshot(after)}/100. (Цель: удержать все давления ниже порогов к концу недели.)"
+    faction_line = ""
+    top = top_faction_changes(before, after, 2)
+    if top:
         bits = []
-        for _, d, ru in deltas:
-            direction = "растут" if d > 0 else "падают"
-            bits.append(f"{ru} {direction} ({fmt_delta(d)})")
-        phrases.append(f"У {fr(name)} {', '.join(bits)}.")
+        for _, name, b, a in top:
+            d = a["power"] - b["power"]
+            if d != 0:
+                bits.append(f"{fr(name)} влияние {fmt_delta(d)}")
+        faction_line = ("**Сдвиги сил:** " + ", ".join(bits) + ".") if bits else ""
+    return delta_line, faction_line, stable
 
-    return delta_line, " ".join(phrases) if phrases else "Фракции двигаются, но без резких прыжков — пока."
+def stability_score_from_snapshot(snap: dict) -> int:
+    # reuse score formula without world instance
+    score = 100
+    score -= max(0, snap["economic_stress"] - STABLE_THRESH_ECON) * 2
+    score -= max(0, snap["public_fear"] - STABLE_THRESH_FEAR) * 2
+    score -= max(0, snap["magical_tension"] - STABLE_THRESH_MAGIC) * 2
+    return int(max(0, min(100, score)))
 
-
-def compress_buffer_to_scene(
-    player_action_key: str,
-    buffer_events: List[Tuple[Role, str]],
-    before: dict,
-    after: dict,
-) -> Tuple[str, List[str]]:
-    """
-    Returns:
-      scene_text: single narrator message combining everything (narrative + crisp feedback)
-      debug_lines: list of raw events (for expander)
-    """
-
-    # --- 1) Take the player immediate consequence (first "player action" text) as the opening beat
-    opening = ""
-    for role, text in buffer_events:
-        # apply_player_action returns a long narrative consequence; it's the first thing pushed after narrator header
-        # In our buffered simulation, we don't push narrator header; we only buffer consequences.
-        if role == "player" or role == "world" or role == "narrator":
-            # We'll identify the "player action consequence" by matching the action key lightly:
-            # easier: just take the first buffered chunk as opening beat, since we start buffer before step.
-            opening = text
-            break
-
-    # --- 2) Pick 1-2 strongest non-player beats (faction moves / escalations / clues)
-    # Heuristic: prioritize escalations and clues (contain "Улика:" or dramatic keywords)
-    keywords_hi = ["Улика:", "вспыхивает", "Толпа", "пожар", "катастроф", "маяк", "маск", "сигил", "шторм"]
-    scored = []
-    for i, (role, text) in enumerate(buffer_events):
-        if i == 0:
-            continue  # opening already
-        score = 0
-        for kw in keywords_hi:
-            if kw.lower() in text.lower():
-                score += 3
-        # Mild bias: short punchy lines are readable
-        score += max(0, 2 - (len(text) // 240))
-        scored.append((score, i, role, text))
-    scored.sort(reverse=True, key=lambda t: t[0])
-
-    beats = []
-    for score, i, role, text in scored[:3]:
-        if score <= 0:
-            continue
-        beats.append(text)
-
-    # If no beats, fallback to one generic line
-    if not beats:
-        beats = ["В городе всё шевелится почти бесшумно — но в этом и опасность: тихие решения часто самые дальнобойные."]
-
-    # --- 3) Numeric and faction summary lines
-    delta_line, faction_phrase = narrate_delta_and_changes(before, after)
-
-    # --- 4) Stitch into one coherent narrator scene
-    # Keep it compact: 3–6 short paragraphs.
-    parts = []
-    parts.append(f"**{day_title(after.get('day', 0) or 0)}**" if False else "")  # unused placeholder
-
-    parts.append(opening.strip())
-
-    # “Монтаж”: 1–2 lines from city reaction
-    # pick 1-2 beats max in narrative body (avoid wall)
-    montage = beats[:2]
-    if montage:
-        parts.append("\n\n".join(montage).strip())
-
-    # Insert concise feedback
-    parts.append(f"{delta_line}\n\n{faction_phrase}")
-
-    # Soft nudge: remind the player that thresholds matter
-    nudge = []
-    if after["public_fear"] >= 75:
-        nudge.append("страх близко к порогу бунта")
-    if after["economic_stress"] >= 70:
-        nudge.append("рынок перегрет")
-    if after["magical_tension"] >= 75:
-        nudge.append("магия на грани срыва")
-    if nudge:
-        parts.append(f"_Пороговые риски_: **{', '.join(nudge)}**.")
-
-    # Final
-    scene_text = "\n\n".join([p for p in parts if p]).strip()
-
-    # Debug lines
-    debug_lines = [f"[{role}] {text}" for role, text in buffer_events]
-
-    return scene_text, debug_lines
-
-
-# -----------------------------
-# Step function: simulate internally, write 1 narrator message
-# -----------------------------
-
-def step_world_compact(w: World, player_action: str) -> Tuple[Optional[str], List[str]]:
-    """
-    Runs a full turn but produces ONE narrator message instead of many.
-    Returns: (ending, debug_lines)
-    """
+def step_world_compact(w: World, player_text: str, mode: str, target: Optional[str], subop: Optional[str]) -> Tuple[Optional[str], List[str]]:
     before = snapshot_world(w)
 
-    # buffer everything that would have been spammed into chat
     w.buffer_start()
 
-    # We still want the immediate consequence text; we buffer it.
-    w.push("player", apply_player_action(w, player_action))
+    # 1) Player action consequence (buffered)
+    w.push("world", apply_player_mode(w, mode, target, subop))
 
-    # Factions act (buffered)
+    # 2) Factions act (buffered)
     for f in list(w.factions.values()):
         intent = faction_intent(w, f)
         w.push("world", apply_faction_action(w, f, intent))
 
-    # System escalations (buffered)
+    # 3) System escalations (buffered)
     for e in system_escalations(w):
         w.push("world", e)
 
-    # Natural drift
-    w.public_fear += 1 if w.economic_stress > 65 else -2
-    w.economic_stress += 1 if w.public_fear > 75 else 0
+    # 4) Gentle drift (tuned to stabilization)
+    # If economy is high, fear tends to rise. If fear is high, economy also worsens.
+    if w.economic_stress > 65:
+        w.public_fear += 1
+    else:
+        w.public_fear -= 1
+    if w.public_fear > 75:
+        w.economic_stress += 1
+
+    # conflict around magic: if Temple dominates Mages too hard, conflict rises
     if "Temple" in w.factions and "Mages" in w.factions:
-        w.magical_tension += 1 if w.factions["Temple"].power > w.factions["Mages"].power + 20 else -1
+        if w.factions["Temple"].power > w.factions["Mages"].power + 25:
+            w.magical_tension += 1
+        else:
+            w.magical_tension -= 1
 
     w.clamp()
-    ending = check_ending(w)
 
-    # advance day
+    # Day advances
     w.day += 1
 
     after = snapshot_world(w)
     buffered = w.buffer_end()
 
-    scene_text, debug_lines = compress_buffer_to_scene(player_action, buffered, before, after)
+    # Compose 1 narrator reply
+    # Choose 1-2 strongest beats (prioritize ship line, disasters)
+    hi_kw = ["По делу корабля:", "ритуал", "Толпа", "сорвался", "вспых", "маяк", "облав", "поставк", "переговор"]
+    scored = []
+    for i, t in enumerate(buffered):
+        score = 0
+        for kw in hi_kw:
+            if kw.lower() in t.lower():
+                score += 3
+        # prefer shorter beats
+        score += max(0, 2 - (len(t) // 260))
+        scored.append((score, i, t))
+    scored.sort(reverse=True, key=lambda x: x[0])
 
-    # One narrator message in the main log
-    w.push("narrator", scene_text)
+    beats = []
+    for score, i, t in scored[:4]:
+        if score <= 0:
+            continue
+        beats.append(t)
+    if not beats:
+        beats = buffered[:2] if buffered else ["Город отвечает без слов — переменой воздуха и настроения."]
+
+    delta_line, faction_line, stable_line = narrate_summary(before, after)
+
+    # Simple "risk" line
+    risks = []
+    if after["economic_stress"] > STABLE_THRESH_ECON:
+        risks.append("рынок")
+    if after["public_fear"] > STABLE_THRESH_FEAR:
+        risks.append("страх")
+    if after["magical_tension"] > STABLE_THRESH_MAGIC:
+        risks.append("конфликт магии")
+    risk_line = f"_Риски выше порога_: **{', '.join(risks)}**." if risks else "_Все давления ниже порогов: город выглядит управляемым._"
+
+    narrator = (
+        f"**{day_title(before['day'])}**\n\n"
+        + "\n\n".join(beats[:2]).strip()
+        + "\n\n"
+        + delta_line
+        + ("\n\n" + faction_line if faction_line else "")
+        + "\n\n"
+        + stable_line
+        + "\n\n"
+        + risk_line
+    ).strip()
+
+    w.push("narrator", narrator)
+
+    # Determine ending if episode is over
+    ending = None
+    if w.day > w.max_days:
+        ending = ending_text(w)
+
+    # Debug lines for expander
+    debug_lines = buffered
 
     return ending, debug_lines
 
 
 # -----------------------------
-# Streamlit UI
+# Init
 # -----------------------------
 
-st.set_page_config(page_title="Нерисса: CRPG-диалог + HUD (compact turn)", layout="wide")
+def init_world_from_df(df: pd.DataFrame, seed: int, max_days: int) -> World:
+    w = World(seed=seed, max_days=max_days)
+    w.factions = df_to_factions(df)
+
+    r = random.Random(seed)
+    w.ship_suspect = r.choices(
+        ["lodge", "mages", "merchants", "accident"],
+        weights=[30, 30, 20, 20],
+        k=1
+    )[0]
+
+    w.log = []
+    w.day = 1
+
+    w.economic_stress = 40
+    w.public_fear = 30
+    w.magical_tension = 50
+
+    # Opening
+    w.push(
+        "narrator",
+        f"**{day_title(1)}**\n\n"
+        "В гавани Нериссы пропадает корабль с *астральным углём*. "
+        "Это не просто груз: это тепло мастерских, ход портовых механизмов и спокойствие рынка.\n\n"
+        "**Цель недели:** удержать город в управляемом состоянии — без голода, без толпы и без взрыва конфликта вокруг магии."
+    )
+
+    # Initial shock
+    w.economic_stress += 18
+    w.public_fear += 12
+    if "Mages" in w.factions:
+        w.factions["Mages"].stability -= 6
+    w.clamp()
+    return w
+
+
+# -----------------------------
+# UI
+# -----------------------------
+
+st.set_page_config(page_title="Нерисса: стабилизация города", layout="wide")
 
 st.markdown("""
 <style>
@@ -790,13 +844,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Нерисса: Пепельная неделя — компактный ход")
-st.caption("Теперь: **1 выбор игрока → 1 ответ Хроникёра** (внутри: реакция города, фракции, события, итог по дельтам).")
+st.title("Нерисса — Неделя стабилизации (MVP)")
+st.caption("Упрощённый UI: выбираешь **режим** → (иногда) **цель** → получаешь **один** ответ Хроникёра. Глубина — внутри систем.")
 
 with st.sidebar:
     st.header("Сессия")
     seed = st.number_input("Seed (для повторяемости)", min_value=1, max_value=999999, value=42, step=1)
-    max_days = st.slider("Длительность эпизода (дней)", min_value=3, max_value=30, value=7, step=1)
+    max_days = st.slider("Длительность эпизода (дней)", min_value=3, max_value=14, value=7, step=1)
 
     st.divider()
     st.header("Баланс (CSV)")
@@ -821,8 +875,8 @@ with st.sidebar:
             st.toast("Сброшено", icon="🔄")
 
     st.divider()
-    st.subheader("Таблица фракций (редактируемая)")
-    st.caption("Правки применятся после **Новая игра / Сброс мира**.")
+    st.subheader("Таблица фракций")
+    st.caption("Правки применятся после **Новая игра**.")
 
     if "factions_df" not in st.session_state:
         st.session_state["factions_df"] = load_factions_df()
@@ -847,7 +901,7 @@ with st.sidebar:
     st.session_state["factions_df"] = edited
 
     st.divider()
-    if st.button("Новая игра / Сброс мира", type="primary"):
+    if st.button("Новая игра", type="primary"):
         df = st.session_state.get("factions_df", load_factions_df())
         st.session_state["world"] = init_world_from_df(df, seed=seed, max_days=max_days)
         st.session_state["ending"] = None
@@ -867,31 +921,26 @@ if "debug_last_turn" not in st.session_state:
 
 w: World = st.session_state["world"]
 
-# Layout
 chat_col, hud_col = st.columns([0.70, 0.30], gap="large")
 
 with hud_col:
     st.markdown('<div class="hud-card">', unsafe_allow_html=True)
-    st.markdown('<div class="hud-title">Панель города</div>', unsafe_allow_html=True)
-    st.metric("Экономический стресс", w.economic_stress)
-    st.metric("Общественный страх", w.public_fear)
-    st.metric("Напряжение магии", w.magical_tension)
+    st.markdown('<div class="hud-title">Давления города</div>', unsafe_allow_html=True)
+    st.metric("Экономика (≤55)", w.economic_stress)
+    st.metric("Страх (≤55)", w.public_fear)
+    st.metric("Спор о магии (≤60)", w.magical_tension)
+    st.markdown(f"<div class='hud-small'><b>Устойчивость:</b> {stability_score(w)}/100</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='hud-small'><b>Корабль:</b> улики {w.ship_progress}/{w.ship_target}</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    risks = []
-    if w.public_fear >= 80:
-        risks.append("⚠️ Возможен бунт")
-    if w.economic_stress >= 75:
-        risks.append("⚠️ Рынок на грани срыва")
-    if w.magical_tension >= 80:
-        risks.append("⚠️ Риск магической аварии")
-    if not risks:
-        risks.append("✅ Пороговых рисков нет")
-
-    st.markdown("<div class='hud-small'>" + "<br>".join(risks) + "</div>", unsafe_allow_html=True)
+    lf, lp = leader_faction(w)
+    st.markdown('<div class="hud-card">', unsafe_allow_html=True)
+    st.markdown('<div class="hud-title">Баланс сил</div>', unsafe_allow_html=True)
+    st.markdown(f"- **Сейчас сильнее всех:** {fr(lf)}")
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="hud-card">', unsafe_allow_html=True)
-    st.markdown('<div class="hud-title">Намерения фракций (прогноз хода)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hud-title">Прогноз намерений</div>', unsafe_allow_html=True)
     for f in w.factions.values():
         intent = faction_intent(w, f)
         st.markdown(f"- **{fr(f.name)}**: _{intent_title_ru(intent)}_ — {intent_reason_ru(w, f, intent)}")
@@ -907,6 +956,7 @@ with hud_col:
             "стаб": f.stability,
             "рад": f.radicalization,
             "рес": f.resources,
+            "к_тебе": f.rel_player,
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -923,79 +973,90 @@ with chat_col:
     st.subheader(f"Сцена: день {w.day}/{w.max_days}")
 
     if st.session_state["ending"]:
-        st.error("ФИНАЛ")
+        st.error("ИТОГ")
         st.markdown(st.session_state["ending"])
-        st.info("Нажми **Новая игра / Сброс мира** в сайдбаре, чтобы сыграть ещё раз.")
+        st.info("Нажми **Новая игра** в сайдбаре, чтобы сыграть ещё раз.")
 
-    # Controls for chat feed
+    # Chat feed controls
     cA, cB, cC = st.columns([1, 1, 1])
     with cA:
         chat_height = st.slider("Высота ленты", 350, 900, 650, 50, key="chat_height")
     with cB:
         render_last = st.slider("Сообщений в ленте", 20, 200, 80, 10, key="render_last")
     with cC:
-        if st.button("⬇️ Вниз к последнему", use_container_width=True):
+        if st.button("⬇️ Вниз", use_container_width=True):
             st.rerun()
 
-    # Chat feed container (fixed height, internal scroll)
     feed = st.container(height=chat_height)
     with feed:
         st.markdown('<div class="chat-feed">', unsafe_allow_html=True)
-        if not w.log:
+        msgs = w.log[-render_last:] if w.log else []
+        if not msgs:
             st.info("Пока пусто. Выбери действие ниже.")
         else:
-            msgs = w.log[-render_last:]
             for m in msgs:
                 with st.chat_message(ROLE_TO_CHAT[m.role]):
                     st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Choice panel + preview
-    st.markdown("### Выбор реплики / действия")
+    # ACTION PANEL (simplified)
+    st.markdown("### Ход")
     disabled = bool(st.session_state["ending"]) or (w.day > w.max_days)
 
-    options = ["investigate", "support_temple", "support_mages", "support_merchants", "spread_rumour", "bribe", "noop"]
-    choice = st.radio(
-        "",
-        options=options,
-        format_func=lambda k: PLAYER_ACTIONS_RU[k]["title"],
-        disabled=disabled,
-        label_visibility="collapsed",
-        key="choice_radio",
-    )
+    mode = st.radio("Режим", MODE_LIST, index=0, horizontal=True, disabled=disabled)
+    st.caption(MODE_DESC.get(mode, ""))
 
-    st.caption(PLAYER_ACTIONS_RU[choice]["desc"])
-    bullets, disclaimer = preview_effect_ru(choice)
+    target = None
+    subop = None
+
+    needs_target = mode in ("Влияние", "Тайные меры")
+    if needs_target:
+        # Show target selector only when relevant
+        target = st.radio("Цель", faction_choices(w), format_func=lambda k: fr(k), horizontal=True, disabled=disabled)
+
+    if mode == "Влияние":
+        subop = st.radio("Действие", INFLUENCE_OPS, horizontal=True, disabled=disabled)
+    elif mode == "Тайные меры":
+        subop = st.radio("Действие", SECRET_OPS, horizontal=True, disabled=disabled)
+
+    # Preview (compact)
     st.markdown('<div class="preview-card">', unsafe_allow_html=True)
-    st.markdown("**Превью эффекта:**\n\n" + bullets)
-    st.markdown(f"<span style='opacity:0.8; font-size: 0.85rem;'>{disclaimer}</span>", unsafe_allow_html=True)
+    if mode == "Стабилизация":
+        st.markdown("**Превью:** сильнее всего снижает самое ‘горящее’ давление (экономика/страх/спор о магии).")
+    elif mode == "Влияние":
+        st.markdown("**Превью:** усиливаешь/ослабляешь выбранную фракцию и получаешь побочные эффекты на давления города.")
+    elif mode == "Тайные меры":
+        st.markdown("**Превью:** даёт быстрый контроль над влиянием/лояльностью, но чаще повышает страх (коррупционный/панический фон).")
+    elif mode == "Расследование (корабль)":
+        st.markdown("**Превью:** улики +1 (гарантированно), страх −3. Сюжетные биты всплывают чаще.")
+    else:
+        st.markdown("**Превью:** город сыграет сам, риски могут тихо подрасти.")
     st.markdown("</div>", unsafe_allow_html=True)
 
     b1, b2 = st.columns([1, 1])
 
-    def apply_turn(player_action: str):
-        # 1) show player line (CRPG style)
-        w.push("player", PLAYER_ACTIONS_RU.get(player_action, {"title": player_action}).get("title", player_action))
+    def apply_turn():
+        # Player line (keep, CRPG feel)
+        player_line = f"{mode}" + (f" → {fr(target)}" if target else "") + (f" ({subop})" if subop else "")
+        w.push("player", player_line)
 
-        # 2) simulate internally and write ONE narrator message
-        ending, debug_lines = step_world_compact(w, player_action)
+        ending, debug_lines = step_world_compact(w, player_line, mode, target, subop)
         st.session_state["debug_last_turn"] = debug_lines
 
         if ending:
             st.session_state["ending"] = ending
 
-        if w.day > w.max_days and not st.session_state["ending"]:
-            st.session_state["ending"] = check_ending(w) or (
-                "**Патовая неделя.**\n\nНикто не получил решающего преимущества. "
-                "Город выжил — и это уже событие. Но узлы затянуты, а не развязаны."
-            )
-
     with b1:
-        if st.button("Сказать/Сделать это", type="primary", use_container_width=True, disabled=disabled):
-            apply_turn(choice)
+        if st.button("Сделать ход", type="primary", use_container_width=True, disabled=disabled):
+            apply_turn()
             st.rerun()
 
     with b2:
-        if st.button("Пропустить ход", use_container_width=True, disabled=disabled):
-            apply_turn("noop")
+        if st.button("Быстрый ход: Стабилизация", use_container_width=True, disabled=disabled):
+            mode_fast = "Стабилизация"
+            w.push("player", mode_fast)
+            ending, debug_lines = step_world_compact(w, mode_fast, mode_fast, None, None)
+            st.session_state["debug_last_turn"] = debug_lines
+            if ending:
+                st.session_state["ending"] = ending
             st.rerun()
