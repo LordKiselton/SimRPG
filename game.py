@@ -81,6 +81,9 @@ class Kingdom:
     # track which event has been announced into chat (to avoid duplicates)
     announced_event_id: Optional[str] = None
 
+    # last turn deltas for UI hints
+    last_turn_deltas: Dict[str, int] = field(default_factory=dict)
+
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
 
     def rng(self) -> random.Random:
@@ -807,16 +810,67 @@ def diff(a: dict, b: dict) -> Dict[str, int]:
         out[key] = int(b[key]) - int(a[key])
     return {kk: vv for kk, vv in out.items() if vv != 0}
 
-def deltas_line_colored(deltas: Dict[str, int]) -> str:
+def _delta_arrows(d: int) -> str:
+    """No digits: show direction + intensity."""
+    a = abs(int(d))
+    if a >= 12:
+        arrows = "⬆️⬆️⬆️" if d > 0 else "⬇️⬇️⬇️"
+    elif a >= 7:
+        arrows = "⬆️⬆️" if d > 0 else "⬇️⬇️"
+    else:
+        arrows = "⬆️" if d > 0 else "⬇️"
+    return arrows
+
+def deltas_line_readable(deltas: Dict[str, int]) -> str:
+    """Readable deltas without numbers (chat-friendly)."""
     keys = ["treasury", "order", "health", "nobles", "faith", "border", "decay"]
-    parts = []
+    parts: List[str] = []
     for k in keys:
         if k in deltas and deltas[k] != 0:
-            d = deltas[k]
+            d = int(deltas[k])
             color = "#22c55e" if d > 0 else "#ef4444"
-            sign = "+" if d > 0 else ""
-            parts.append(f"<span style='color:{color}; font-weight:700'>{STAT_LABELS[k]} {sign}{d}</span>")
-    return " · ".join(parts) if parts else "Сдвиги мелкие — но мелочи иногда и ломают короны."
+            parts.append(
+                f"<span style='color:{color}; font-weight:700'>{STAT_LABELS[k]} {_delta_arrows(d)}</span>"
+            )
+    return " · ".join(parts) if parts else "Сдвиги тихие. Это не значит — добрые."
+
+def stat_state_word(stat: str, v: int) -> str:
+    """Qualitative state only (no digits)."""
+    v = int(v)
+    if v >= 80:
+        tier = "цветёт"
+    elif v >= GREEN:
+        tier = "крепко держится"
+    elif v >= YELLOW:
+        tier = "шатается"
+    elif v >= 20:
+        tier = "хрипит"
+    else:
+        tier = "на краю"
+    return f"{STAT_LABELS.get(stat, stat)} — {tier}"
+
+def kingdom_states_line(k: Kingdom) -> str:
+    parts = [
+        stat_state_word("treasury", k.treasury),
+        stat_state_word("order", k.order),
+        stat_state_word("health", k.health),
+        stat_state_word("nobles", k.nobles),
+        stat_state_word("faith", k.faith),
+        stat_state_word("border", k.border),
+    ]
+    return " · ".join(parts)
+
+def choice_effect_preview(effects: dict) -> str:
+    """Short preview for radio options (no numbers)."""
+    show_keys = ["treasury", "order", "health", "nobles", "faith", "border"]
+    parts = []
+    for k in show_keys:
+        if k in effects and int(effects[k]) != 0:
+            d = int(effects[k])
+            parts.append(f"{STAT_LABELS[k]}{_delta_arrows(d)}")
+    if "tags_add" in effects:
+        parts.append("следы…")
+    return " · ".join(parts)
 
 
 def enhanced_ending(k: Kingdom, reasons: list[str]) -> str:
@@ -907,10 +961,12 @@ def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
     after = snapshot(k)
 
     deltas = diff(before, after)
+    k.last_turn_deltas = deltas
 
     narrator_text = (
         f"**День {before['day']} завершён**\n\n"
-        f"**Сдвиги:** {deltas_line_colored(deltas)}\n\n"
+        f"**Сдвиги:** {deltas_line_readable(deltas)}\n\n"
+        f"**Состояние:** {kingdom_states_line(k)}\n\n"
         f"{decay_explain}"
     )
     k.push("narrator", narrator_text)
@@ -1022,12 +1078,12 @@ with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown(f"**Упадок:** {k.decay}/10 · {decay_badge(k.decay)}")
     st.progress(k.decay / 10.0)
-    st.markdown(f"- Казна: {zone(k.treasury)} {k.treasury}")
-    st.markdown(f"- Порядок: {zone(k.order)} {k.order}")
-    st.markdown(f"- Здоровье: {zone(k.health)} {k.health}")
-    st.markdown(f"- Знать: {zone(k.nobles)} {k.nobles}")
-    st.markdown(f"- Вера: {zone(k.faith)} {k.faith}")
-    st.markdown(f"- Граница: {zone(k.border)} {k.border}")
+    st.markdown(f"- Казна: {zone(k.treasury)} {k.treasury}{(' ' + _delta_arrows(k.last_turn_deltas.get('treasury',0))) if k.last_turn_deltas.get('treasury',0) else ''}")
+    st.markdown(f"- Порядок: {zone(k.order)} {k.order}{(' ' + _delta_arrows(k.last_turn_deltas.get('order',0))) if k.last_turn_deltas.get('order',0) else ''}")
+    st.markdown(f"- Здоровье: {zone(k.health)} {k.health}{(' ' + _delta_arrows(k.last_turn_deltas.get('health',0))) if k.last_turn_deltas.get('health',0) else ''}")
+    st.markdown(f"- Знать: {zone(k.nobles)} {k.nobles}{(' ' + _delta_arrows(k.last_turn_deltas.get('nobles',0))) if k.last_turn_deltas.get('nobles',0) else ''}")
+    st.markdown(f"- Вера: {zone(k.faith)} {k.faith}{(' ' + _delta_arrows(k.last_turn_deltas.get('faith',0))) if k.last_turn_deltas.get('faith',0) else ''}")
+    st.markdown(f"- Граница: {zone(k.border)} {k.border}{(' ' + _delta_arrows(k.last_turn_deltas.get('border',0))) if k.last_turn_deltas.get('border',0) else ''}")
     st.markdown("</div>", unsafe_allow_html=True)
 
 with left:
@@ -1074,7 +1130,7 @@ with left:
         choice_idx = st.radio(
             "",
             options=list(range(len(choice_texts))),
-            format_func=lambda i: choice_texts[i],
+            format_func=lambda i: f"{choice_texts[i]}  —  {choice_effect_preview(ev['choices'][i]['effects'])}",
             disabled=disabled,
             label_visibility="collapsed",
             key="choice_radio",
