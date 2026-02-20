@@ -910,14 +910,17 @@ st.markdown("""
   background: rgba(255,255,255,0.02);
 }
 .small { font-size: 0.9rem; opacity: 0.85; }
-.decay-wrap {
-  border: 1px solid rgba(255,255,255,0.10);
+.sticky {
+  position: sticky;
+  top: 0.9rem;
+}
+.choice-wrap {
+  border: 1px solid rgba(255,255,255,0.08);
   border-radius: 14px;
   padding: 10px 12px;
-  background: rgba(255,255,255,0.02);
+  background: rgba(255,255,255,0.015);
 }
-.decay-title { font-weight: 800; font-size: 1.05rem; }
-.decay-sub { opacity: 0.85; margin-top: 2px; }
+.choice-title { font-weight: 800; margin-bottom: 6px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -954,10 +957,11 @@ if k.current_event and k.current_event_id:
 elif not k.current_event:
     new_day_event(k)
 
-# ---- Main layout: chat left, stats right ----
+# ---- Main layout: chat left, stats right (sticky) ----
 left, right = st.columns([0.70, 0.30], gap="large")
 
 with right:
+    st.markdown("<div class='sticky'>", unsafe_allow_html=True)
     st.subheader("Показатели")
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown(f"**Упадок:** {k.decay}/10 · {decay_badge(k.decay)}")
@@ -969,16 +973,18 @@ with right:
     st.markdown(f"- Вера: {zone(k.faith)} {k.faith}")
     st.markdown(f"- Граница: {zone(k.border)} {k.border}")
     st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
 with left:
     st.subheader(f"День {k.day}/{k.max_days}")
 
-    if st.session_state["ending"]:
+    if st.session_state.get("ending"):
         st.info("Партия завершена. Нажми **Новая партия** в сайдбаре, чтобы начать заново.")
 
-    chat_height = st.session_state.get("chat_height", 500)
-    render_last = st.session_state.get("render_last", 120)
+    chat_height = st.session_state.get("chat_height", 520)
+    render_last = st.session_state.get("render_last", 140)
 
+    # ---- Chat feed ----
     feed = st.container(height=chat_height)
     with feed:
         st.markdown('<div class="chat-feed">', unsafe_allow_html=True)
@@ -992,54 +998,41 @@ with left:
                     st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("### Решение трона")
-    disabled = bool(st.session_state["ending"]) or (k.day > k.max_days) or (k.current_event is None)
-
+    # ---- Choices inside the chat (minimal UI) ----
+    disabled = bool(st.session_state.get("ending")) or (k.day > k.max_days) or (k.current_event is None)
     ev = k.current_event
-    if ev:
-        choice_texts = [c["text"] for c in ev["choices"]]
-        choice_idx = st.radio(
-            "",
-            options=list(range(len(choice_texts))),
-            format_func=lambda i: choice_texts[i],
-            disabled=disabled,
-            label_visibility="collapsed",
-            key="choice_radio",
-        )
 
-        b1, b2 = st.columns([1, 1])
-        with b1:
-            if st.button("Издать указ", type="primary", use_container_width=True, disabled=disabled):
-                k.push("player", f"Я решаю: **{choice_texts[choice_idx]}**")
-                end = play_choice(k, choice_idx)
-                st.session_state["ending"] = end
-                if not st.session_state["ending"] and k.day <= k.max_days:
-                    new_day_event(k)
-                st.rerun()
+    if ev and not disabled:
+        with st.chat_message("assistant", avatar="📣"):
+            st.markdown("<div class='choice-wrap'>", unsafe_allow_html=True)
+            st.markdown("<div class='choice-title'>Каков будет указ?</div>", unsafe_allow_html=True)
 
-        with b2:
-            if st.button("Пропустить (плохая идея)", use_container_width=True, disabled=disabled):
-                k.push("player", "Я решаю: **ничего не делать** (и надеюсь, что беда стесняется).")
-                k.current_event = {
-                    "id": "skip",
-                    "npc": "chancellor",
-                    "domain": "order",
-                    "severity": 2,
-                    "title": "Тишина (которая тоже событие)",
-                    "intro": "Во дворце тихо. Это плохая тишина — когда слышно, как государство скрипит.",
-                    "choices": [
-                        {"text": "…", "effects": {"treasury": -2, "order": -2}, "outro": "Ты ничего не сделал. Мир сделал выводы."}
-                    ],
-                }
-                k.current_event_id = "skip"
-                k.announced_event_id = None
-                announce_event_if_needed(k)
+            choice_texts = [c["text"] for c in ev["choices"]]
+            c1, c2, c3 = st.columns(3)
+            clicked = None
+            with c1:
+                if st.button(choice_texts[0], use_container_width=True, key=f"c0_{k.day}"):
+                    clicked = 0
+            with c2:
+                if st.button(choice_texts[1], use_container_width=True, key=f"c1_{k.day}"):
+                    clicked = 1
+            with c3:
+                if st.button(choice_texts[2], use_container_width=True, key=f"c2_{k.day}"):
+                    clicked = 2
 
-                end = play_choice(k, 0)
-                st.session_state["ending"] = end
-                if not st.session_state["ending"] and k.day <= k.max_days:
-                    new_day_event(k)
-                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        if clicked is not None:
+            k.push("player", f"Я решаю: **{choice_texts[clicked]}**")
+            end = play_choice(k, clicked)
+            st.session_state["ending"] = end
+            if not st.session_state["ending"] and k.day <= k.max_days:
+                new_day_event(k)
+            st.rerun()
+
+    elif ev and disabled and not st.session_state.get("ending"):
+        # When decisions are disabled because day ended, do nothing.
+        pass
 
 # ---- Active tags (moved to the bottom) ----
 with st.expander("Активные следы решений"):
@@ -1051,6 +1044,6 @@ with st.expander("Активные следы решений"):
 
 # ---- Hidden chat controls ----
 with st.expander("Настройки ленты (не трогать без нужды)"):
-    st.session_state["chat_height"] = st.slider("Высота ленты", 250, 900, int(st.session_state.get("chat_height", 500)), 50)
-    st.session_state["render_last"] = st.slider("Сколько сообщений показывать", 20, 200, int(st.session_state.get("render_last", 120)), 10)
+    st.session_state["chat_height"] = st.slider("Высота ленты", 250, 900, int(st.session_state.get("chat_height", 520)), 50)
+    st.session_state["render_last"] = st.slider("Сколько сообщений показывать", 20, 200, int(st.session_state.get("render_last", 140)), 10)
     st.caption("🟢 ≥60, 🟡 40–59, 🔴 <40. Упадок растёт, если кризис дня не купирован и/или есть 2+ 🔴 зоны.")
