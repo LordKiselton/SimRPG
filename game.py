@@ -645,13 +645,61 @@ with chat_col:
         st.info("Нажми **Новая игра / Сброс мира** в сайдбаре, чтобы сыграть ещё раз.")
 
     # Chat log
-    st.markdown("### Диалог")
-    if not w.log:
-        st.info("Пока пусто. Выбери действие снизу.")
-    else:
-        msgs = w.log[-100:]  # last 100 messages
-        for m in msgs:
-            with st.chat_message(ROLE_TO_CHAT[m.role]):
+st.markdown("### Диалог")
+
+# Сколько сообщений держим на главном экране
+main_keep = st.slider(
+    "Сколько сообщений показывать на главном экране",
+    min_value=10,
+    max_value=120,
+    value=40,
+    step=10,
+    help="Это только витрина сцены. Полный журнал доступен отдельно.",
+    key="main_keep_slider"
+)
+
+if not w.log:
+    st.info("Пока пусто. Выбери действие снизу.")
+else:
+    msgs = w.log[-main_keep:]
+    for m in msgs:
+        with st.chat_message(ROLE_TO_CHAT[m.role]):
+            st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
+
+# --- Отдельное окно журнала ---
+# Вариант 1 (предпочтительно): popover (если доступен)
+try:
+    with st.popover("📜 Журнал событий / лог"):
+        st.caption("Здесь можно смотреть всю историю и управлять объёмом вывода.")
+        log_keep = st.slider(
+            "Сколько последних сообщений показать в журнале",
+            min_value=50,
+            max_value=max(50, len(w.log)),
+            value=min(300, len(w.log)) if len(w.log) > 0 else 50,
+            step=50,
+            key="log_keep_slider"
+        )
+
+        # Прокручиваемое окно
+        log_container = st.container(height=420)
+        with log_container:
+            for m in w.log[-log_keep:]:
+                st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
+except Exception:
+    # Вариант 2: expander (если popover недоступен)
+    with st.expander("📜 Журнал событий / лог"):
+        st.caption("Здесь можно смотреть всю историю и управлять объёмом вывода.")
+        log_keep = st.slider(
+            "Сколько последних сообщений показать в журнале",
+            min_value=50,
+            max_value=max(50, len(w.log)),
+            value=min(300, len(w.log)) if len(w.log) > 0 else 50,
+            step=50,
+            key="log_keep_slider"
+        )
+        log_container = st.container(height=420)
+        with log_container:
+            for m in w.log[-log_keep:]:
                 st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
 
     # Choice panel
@@ -704,3 +752,4 @@ with chat_col:
     with st.expander("Весь журнал диалога"):
         for m in w.log:
             st.markdown(f"**{m.role.upper()}**: {m.content}")
+
