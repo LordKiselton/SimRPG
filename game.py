@@ -2,15 +2,27 @@
 # Streamlit Majesty-like procedural kingdom crisis prototype (7 days).
 #
 # Run:
-#   pip install streamlit pandas
+#   pip install streamlit
 #   streamlit run majesty_game.py
 #
-# What you get:
-# - 1 day = 1 "весть" от колоритного NPC + 2–3 решения
-# - 1 выбор игрока -> 1 ответ Хроникёра (ироничный фэнтези / лёгкий dark fantasy)
-# - процедурность: события выбираются по триггерам/весам из состояния
-# - цель: НЕ допустить упадка государства (к концу 7 дня обязательно будет финальный стейт)
-# - простая аналитика: JSONL лог в ./analytics/<session_id>.jsonl
+# Changes in this version (per request):
+# UI
+# - Показатели королевства сверху, горизонтально
+# - Высота ленты по умолчанию 350
+# - Управление лентой спрятано в самый низ (expander)
+# - "Весть дня" справа (вместо панели показателей)
+# - Выбор вариантов остаётся снизу под лентой/вестью
+#
+# Texts
+# - Новый CTA в иронично-шейкспировой манере
+# - Убраны скобки с описанием характеров NPC
+#
+# Content
+# - Добавлено больше "вестей дня" с теми же NPC и разными последствиями
+#
+# System design
+# - Упадок теперь растёт/падает понятнее: зависит от того, купирован ли кризис дня + от общего состояния (красные зоны)
+# - В хронике всегда объясняется, ПОЧЕМУ изменился упадок
 
 from __future__ import annotations
 
@@ -37,7 +49,7 @@ ROLE_TO_CHAT = {
 ROLE_PREFIX = {
     "narrator": "🕯️ **Хроникёр**",
     "npc": "👤 **Весть**",
-    "player": "👑 **Король/Королева**",
+    "player": "👑 **Трон**",
 }
 
 
@@ -69,10 +81,9 @@ class Kingdom:
     faith: int = 55         # Вера/единство
     border: int = 55        # Граница/угрозы
 
-    decay: int = 0          # Упадок (главный fail-meter)
-    doom: int = 0           # Накопитель "неизбежности финала" (гарантия стейта к 7 дню)
+    decay: int = 0          # Упадок (главный fail-meter) 0..10
 
-    tags: List[Tag] = field(default_factory=list)     # временные модификаторы
+    tags: List[Tag] = field(default_factory=list)
     log: List[Message] = field(default_factory=list)
 
     current_event_id: Optional[str] = None
@@ -80,12 +91,10 @@ class Kingdom:
 
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
 
-    # buffering to avoid spam in chat
     buffer_mode: bool = False
     _buffer: List[str] = field(default_factory=list)
 
     def rng(self) -> random.Random:
-        # deterministic per day
         return random.Random(self.seed + self.day * 1337)
 
     def clamp(self):
@@ -93,7 +102,6 @@ class Kingdom:
             v = getattr(self, k)
             setattr(self, k, int(max(0, min(100, v))))
         self.decay = int(max(0, min(10, self.decay)))
-        self.doom = int(max(0, min(20, self.doom)))
 
     def push(self, role: Role, text: str):
         if self.buffer_mode:
@@ -112,7 +120,6 @@ class Kingdom:
         return out
 
     def add_tag(self, name: str, days: int):
-        # refresh if exists
         for t in self.tags:
             if t.name == name:
                 t.days_left = max(t.days_left, days)
@@ -134,6 +141,16 @@ class Kingdom:
 GREEN = 60
 YELLOW = 40
 
+STAT_LABELS = {
+    "treasury": "Казна",
+    "order": "Порядок",
+    "health": "Здоровье",
+    "nobles": "Знать",
+    "faith": "Вера",
+    "border": "Граница",
+    "decay": "Упадок",
+}
+
 def zone(v: int) -> str:
     if v >= GREEN:
         return "🟢"
@@ -141,16 +158,19 @@ def zone(v: int) -> str:
         return "🟡"
     return "🔴"
 
+def red_count(k: Kingdom) -> int:
+    return sum(1 for v in (k.treasury, k.order, k.health, k.nobles, k.faith, k.border) if v < YELLOW)
+
+def green_count(k: Kingdom) -> int:
+    return sum(1 for v in (k.treasury, k.order, k.health, k.nobles, k.faith, k.border) if v >= GREEN)
+
 def stable_state(k: Kingdom) -> bool:
-    # stable if all non-red and decay low
-    reds = sum(1 for v in (k.treasury, k.order, k.health, k.nobles, k.faith, k.border) if v < YELLOW)
-    return (reds == 0) and (k.decay <= 2)
+    # “Удержали государство”: нет красных зон и упадок низкий
+    return (red_count(k) == 0) and (k.decay <= 2)
 
 def stability_score(k: Kingdom) -> int:
-    # 0..100-ish
     vals = [k.treasury, k.order, k.health, k.nobles, k.faith, k.border]
     base = sum(vals) // len(vals)
-    # penalize red zones
     penalty = sum(10 for v in vals if v < YELLOW) + sum(4 for v in vals if YELLOW <= v < GREEN)
     score = base - penalty - k.decay * 5
     return int(max(0, min(100, score)))
@@ -169,51 +189,26 @@ def worst_stat(k: Kingdom) -> Tuple[str, int]:
 
 
 # -----------------------------
-# NPC voices
+# NPC voices (no parenthetical traits)
 # -----------------------------
 NPCS: Dict[str, dict] = {
-    "chancellor": {
-        "name": "Канцлер Медь-у-Ногтя",
-        "tone": "деловой, язвительный",
-        "emoji": "📜",
-    },
-    "marshal": {
-        "name": "Маршал Гримм из Северных Кольев",
-        "tone": "прямой, мрачный",
-        "emoji": "🛡️",
-    },
-    "bishop": {
-        "name": "Архиепископиня Серафима Пепельная",
-        "tone": "торжественный, угрожающе-ласковый",
-        "emoji": "🔥",
-    },
-    "physician": {
-        "name": "Лекарь Профитроль (клятва дана, но мелким шрифтом)",
-        "tone": "профессиональный, циничный",
-        "emoji": "🩺",
-    },
-    "spymaster": {
-        "name": "Шептун Барон Без-Лица",
-        "tone": "спокойный, неприятно точный",
-        "emoji": "🕷️",
-    },
-    "reeve": {
-        "name": "Староста Милая-Но-С-Молотком",
-        "tone": "простая, бодрая, с угрозой",
-        "emoji": "🧺",
-    },
+    "chancellor": {"name": "Канцлер Медь-у-Ногтя", "emoji": "📜"},
+    "marshal":    {"name": "Маршал Гримм из Северных Кольев", "emoji": "🛡️"},
+    "bishop":     {"name": "Архиепископиня Серафима Пепельная", "emoji": "🔥"},
+    "physician":  {"name": "Лекарь Профитроль", "emoji": "🩺"},
+    "spymaster":  {"name": "Шептун Барон Без-Лица", "emoji": "🕷️"},
+    "reeve":      {"name": "Староста Милая-Но-С-Молотком", "emoji": "🧺"},
 }
 
 def npc_header(npc_id: str) -> str:
     n = NPCS[npc_id]
-    return f"{n['emoji']} **{n['name']}** (_{n['tone']}_)"
+    return f"{n['emoji']} **{n['name']}**"
 
 
 # -----------------------------
-# Event system
+# Event system: triggers / weights / effects
 # -----------------------------
 def trig_ok(k: Kingdom, trig: dict) -> bool:
-    # Supported triggers: stat_lt, stat_gt, has_tag, not_tag, day_ge, day_le
     for key, val in trig.items():
         if key.endswith("_lt"):
             stat = key[:-3]
@@ -236,21 +231,10 @@ def trig_ok(k: Kingdom, trig: dict) -> bool:
             if k.day > int(val):
                 return False
         else:
-            # unknown trigger key -> fail safe (don't show)
             return False
     return True
 
-
 def apply_effects(k: Kingdom, effects: dict) -> Dict[str, int]:
-    """
-    Apply numeric deltas and tags:
-      effects: {
-         "treasury": -5, "order": +3, ...
-         "decay": +1, "doom": +2,
-         "tags_add": {"martial_law": 2, ...}
-      }
-    Returns dict of deltas actually applied for display/analytics.
-    """
     deltas: Dict[str, int] = {}
     for stat, delta in effects.items():
         if stat == "tags_add":
@@ -267,258 +251,446 @@ def apply_effects(k: Kingdom, effects: dict) -> Dict[str, int]:
     k.clamp()
     return deltas
 
-
 def weight_for_event(k: Kingdom, ev: dict) -> int:
     w = int(ev.get("weight", 1))
-
-    # cheap dynamic weighting: make crises more likely when related stat is bad
     bias = ev.get("bias", {})
     for stat, mult in bias.items():
         v = getattr(k, stat)
-        # lower stat -> higher weight
         if v < YELLOW:
             w += int(mult) * 3
         elif v < GREEN:
             w += int(mult)
-    # tags influence
     for tag, add in ev.get("tag_weight", {}).items():
         if k.has_tag(tag):
             w += int(add)
-    # doom nudges towards "resolution" events late
     if k.day >= 6 and ev.get("late_boost", False):
-        w += 6 + k.doom // 2
-
+        w += 6
     return max(0, w)
 
+def eligible_events(k: Kingdom, events: List[dict]) -> List[dict]:
+    evs = [ev for ev in events if trig_ok(k, ev.get("trigger", {}))]
+    return evs if evs else events[:]  # fallback
 
+
+# -----------------------------
+# Content: more daily news (same NPCs)
+# Each event has:
+# - domain: one of stats; resolution is judged primarily on this domain
+# - severity: 1..3 (how much it can push decay if left unresolved)
+# - choices: effects on stats + optional tags; outro text
+# -----------------------------
 EVENTS: List[dict] = [
+    # --- Chancellor: money / policy ---
     {
         "id": "rat_tax",
         "npc": "chancellor",
+        "domain": "treasury",
+        "severity": 2,
         "title": "Налог на крыс… простите, на ‘грызунов податных’",
-        "intro": "Канцлер разворачивает свиток, который пахнет чернилами и лёгким отчаянием.\n\n"
-                 "«Ваше Величество, казна скрипит. Предлагаю… расширить налоговую базу. "
+        "intro": "Канцлер раскладывает свитки, как шулер карты.\n\n"
+                 "«Казна скрипит. Предлагаю расширить налоговую базу. "
                  "Крысы, как известно, тоже граждане — если их правильно назвать».\n\n"
-                 "За окнами действительно кто-то скребётся. Возможно, это уже электорат.",
+                 "За окном действительно кто-то скребётся. Возможно, это уже электорат.",
         "trigger": {"treasury_lt": 60},
         "weight": 6,
         "bias": {"treasury": 2},
         "choices": [
-            {
-                "text": "Ввести ‘грызунный’ сбор. Народ переживёт.",
-                "effects": {"treasury": +10, "order": -4, "nobles": -2, "doom": +1, "tags_add": {"tax_hike": 3}},
-                "outro": "Казна толстеет, а народ учится ненавидеть творчески. Крысы смотрят на тебя с уважением."
-            },
-            {
-                "text": "Срезать расходы двора. Да, и свечи тоже.",
-                "effects": {"treasury": +6, "nobles": -4, "faith": -1, "doom": +1, "tags_add": {"austerity": 3}},
-                "outro": "Дворяне обижаются так громко, что эхо уходит в склепы. Зато бухгалтерия впервые улыбается."
-            },
-            {
-                "text": "Ничего не менять. Переждём.",
-                "effects": {"treasury": -4, "doom": +2},
-                "outro": "Свиток сворачивается сам. Казна — тоже."
-            },
+            {"text": "Ввести сбор. Народ переживёт.",
+             "effects": {"treasury": +10, "order": -4, "nobles": -2, "tags_add": {"tax_hike": 3}},
+             "outro": "Казна толстеет, а народ учится ненавидеть творчески. Крысы смотрят на трон с уважением."},
+            {"text": "Срезать расходы двора. Да, и свечи тоже.",
+             "effects": {"treasury": +6, "nobles": -4, "faith": -1, "tags_add": {"austerity": 3}},
+             "outro": "Дворяне обижаются так громко, что эхо уходит в склепы. Зато бухгалтерия впервые улыбается."},
+            {"text": "Ничего не менять. Переждём.",
+             "effects": {"treasury": -4},
+             "outro": "Свиток сворачивается сам. Казна — тоже."},
         ],
     },
     {
+        "id": "mint_scandal",
+        "npc": "chancellor",
+        "domain": "treasury",
+        "severity": 2,
+        "title": "Монетный двор и удивительно мягкое золото",
+        "intro": "Канцлер приносит монету и сгибает её ногтем.\n\n"
+                 "«Ваше Величество, у нас завелась алхимия… без лицензии. "
+                 "Монеты стали мягкими. Народ называет это чудом. Я — инфляцией».\n\n"
+                 "Если не остановить — завтра казна будет полной, но покупать на неё можно будет только уныние.",
+        "trigger": {"treasury_lt": 70},
+        "weight": 5,
+        "bias": {"treasury": 2, "nobles": 1},
+        "choices": [
+            {"text": "Провести чистку монетного двора.",
+             "effects": {"treasury": -4, "order": +6, "nobles": -2, "tags_add": {"audit": 3}},
+             "outro": "Монеты снова звенят честно. Некоторые люди — уже нет."},
+            {"text": "Закрыть глаза и пустить ‘мягкое золото’ в оборот.",
+             "effects": {"treasury": +8, "order": -6, "nobles": -2},
+             "outro": "Деньги льются рекой. Река ведёт к водопаду."},
+            {"text": "Сделать ‘разовую реформу’: обмен и новый герб.",
+             "effects": {"treasury": +2, "order": +2, "faith": -2},
+             "outro": "Народ получает новый герб. Старые проблемы получают новое имя."},
+        ],
+    },
+    {
+        "id": "granary_fire",
+        "npc": "chancellor",
+        "domain": "treasury",
+        "severity": 3,
+        "title": "Пожар в амбарах (и запах чужой выгоды)",
+        "intro": "Канцлер приходит с копотью на манжетах.\n\n"
+                 "«Сгорели амбары. Случайно. Разумеется. "
+                 "Случайность пахнет смолой и чьей-то прибылью».\n\n"
+                 "Голод любит бюрократию: она медленная.",
+        "trigger": {"treasury_lt": 75},
+        "weight": 6,
+        "bias": {"treasury": 2, "order": 1, "health": 1},
+        "choices": [
+            {"text": "Выкупить зерно у гильдий по любой цене.",
+             "effects": {"treasury": -12, "health": +8, "order": +2, "tags_add": {"emergency_buy": 2}},
+             "outro": "Голод отступает, но казна делает вид, что не знакома с твоим именем."},
+            {"text": "Нормировать хлеб. Жёстко. С печатями.",
+             "effects": {"order": +6, "health": +4, "nobles": -2, "tags_add": {"rationing": 3}},
+             "outro": "Люди едят меньше, но живут дольше. Спорят громче."},
+            {"text": "Оставить всё рынку. Рынок мудр… на своей стороне.",
+             "effects": {"health": -8, "order": -4, "treasury": +4},
+             "outro": "Рынок ‘урегулировал’ вопрос. Народ — запомнил."},
+        ],
+    },
+
+    # --- Physician: health ---
+    {
         "id": "plague",
         "npc": "physician",
+        "domain": "health",
+        "severity": 3,
         "title": "Пятна на коже и на репутации",
         "intro": "Лекарь протирает очки рукавом, который видел слишком многое.\n\n"
-                 "«Есть новости. Плохие. Хорошие тоже есть: у нас появилась возможность проверить, "
-                 "насколько быстро крестьяне умеют умирать организованно».\n\n"
-                 "В низинах вспыхнула лихорадка. Люди шепчутся, что это кара. Болезнь — что это статистика.",
+                 "«Лихорадка в низинах. Хорошая новость: мы можем проверить, "
+                 "насколько быстро люди умеют болеть организованно».\n\n"
+                 "Люди шепчутся про кару. Болезнь шепчет про статистику.",
         "trigger": {"health_lt": 60},
         "weight": 7,
         "bias": {"health": 3},
         "choices": [
-            {
-                "text": "Закрыть рынки и дороги на неделю.",
-                "effects": {"health": +14, "treasury": -6, "order": -2, "doom": +1, "tags_add": {"quarantine": 3}},
-                "outro": "Чума упирается в ворота. Торговцы — в твою дверь."
-            },
-            {
-                "text": "Нанять лекарей и алхимиков. Пусть спорят в палатках, не в храме.",
-                "effects": {"treasury": -10, "health": +18, "faith": -2, "doom": +1, "tags_add": {"medical_response": 3}},
-                "outro": "Народ живёт дольше. Священники — обиженно молчат."
-            },
-            {
-                "text": "Объявить пост и молебны. Если не поможет — хотя бы красиво.",
-                "effects": {"faith": +8, "health": +4, "order": -2, "doom": +2, "tags_add": {"pious_edict": 3}},
-                "outro": "Пламя свечей ярче. Температура — тоже."
-            },
+            {"text": "Закрыть рынки и дороги на неделю.",
+             "effects": {"health": +14, "treasury": -6, "order": -2, "tags_add": {"quarantine": 3}},
+             "outro": "Чума упирается в ворота. Торговцы — в твою дверь."},
+            {"text": "Нанять лекарей и алхимиков.",
+             "effects": {"treasury": -10, "health": +18, "faith": -2, "tags_add": {"medical_response": 3}},
+             "outro": "Народ живёт дольше. Священники — тише."},
+            {"text": "Объявить пост и молебны.",
+             "effects": {"faith": +8, "health": +4, "order": -2, "tags_add": {"pious_edict": 3}},
+             "outro": "Свечи ярче. Температура — тоже."},
         ],
     },
     {
+        "id": "well_poison",
+        "npc": "physician",
+        "domain": "health",
+        "severity": 2,
+        "title": "Колodец, который ‘сам испортился’",
+        "intro": "Лекарь приносит кружку воды и не пьёт.\n\n"
+                 "«В восточном квартале люди падают быстро и без лишней драматургии. "
+                 "Колodец ‘сам испортился’. Я бы тоже так оправдывался, но у меня профессия честнее».\n\n"
+                 "Если это саботаж — завтра таких колодцев станет больше.",
+        "trigger": {"health_lt": 75},
+        "weight": 5,
+        "bias": {"health": 2, "order": 1},
+        "choices": [
+            {"text": "Перекрыть колодец, раздать кипячёную воду, найти источник.",
+             "effects": {"treasury": -6, "health": +10, "order": +2, "tags_add": {"water_patrol": 3}},
+             "outro": "Вода становится скучной, но безопасной. Скука — редкая роскошь."},
+            {"text": "Обвинить ‘врагов веры’ и устроить показательное расследование.",
+             "effects": {"faith": +6, "order": +2, "health": +2, "nobles": -2, "tags_add": {"scapegoat": 2}},
+             "outro": "Гнев находит цель. Истина — не обязана."},
+            {"text": "Сэкономить: ‘само пройдёт’.",
+             "effects": {"health": -8, "order": -2},
+             "outro": "Оно не проходит. Оно привыкает."},
+        ],
+    },
+
+    # --- Marshal: border ---
+    {
         "id": "border_monster",
         "npc": "marshal",
+        "domain": "border",
+        "severity": 3,
         "title": "Монстр на тракте (и он не про налоги)",
         "intro": "Маршал снимает шлем. На лице — усталость, на словах — экономия.\n\n"
-                 "«Северный тракт перекрыт. Там завёлся зверь. "
-                 "Местные называют его ‘Костоглот’. Я называю его ‘проблема, которая растит цены’».\n\n"
+                 "«Северный тракт перекрыт. Завёлся зверь. "
+                 "Местные зовут его Костоглот. Я зову его ‘причина роста цен’».\n\n"
                  "Если тракт падёт — падёт и снабжение.",
         "trigger": {"border_lt": 65},
         "weight": 7,
         "bias": {"border": 3, "order": 1},
         "choices": [
-            {
-                "text": "Отправить королевскую дружину. Быстро и дорого.",
-                "effects": {"treasury": -8, "border": +16, "order": +2, "doom": +1, "tags_add": {"royal_patrols": 3}},
-                "outro": "Костоглот исчезает. Дружина — тоже, но позже вернётся с трофеями и травмами."
-            },
-            {
-                "text": "Объявить награду героям. Пусть риск станет профессией.",
-                "effects": {"treasury": -4, "border": +10, "order": +1, "doom": +1, "tags_add": {"bounty": 3}},
-                "outro": "В трактире появляются ‘герои’. Часть из них даже умеет держать меч за рукоять."
-            },
-            {
-                "text": "Закрыть тракт. Переживём на запасах.",
-                "effects": {"border": -6, "treasury": -2, "health": -2, "doom": +2},
-                "outro": "Запасы тают. Монстр сытый. Все довольны, кроме людей."
-            },
+            {"text": "Отправить королевскую дружину.",
+             "effects": {"treasury": -8, "border": +16, "order": +2, "tags_add": {"royal_patrols": 3}},
+             "outro": "Костоглот исчезает. Дружина — вернётся, но не вся."},
+            {"text": "Объявить награду героям.",
+             "effects": {"treasury": -4, "border": +10, "order": +1, "tags_add": {"bounty": 3}},
+             "outro": "В трактире появляются герои. Некоторые даже настоящие."},
+            {"text": "Закрыть тракт. Переживём на запасах.",
+             "effects": {"border": -6, "treasury": -2, "health": -2},
+             "outro": "Запасы тают. Монстр сытый. Люди — нет."},
         ],
     },
     {
+        "id": "raiders",
+        "npc": "marshal",
+        "domain": "border",
+        "severity": 2,
+        "title": "Налётчики с северной улыбкой",
+        "intro": "Маршал кладёт на стол наконечник стрелы.\n\n"
+                 "«Не война. Пока. Просто люди, которые считают чужой скот своим. "
+                 "Если мы промолчим — они решат, что это дипломатия».\n\n"
+                 "Граница — это место, где терпение заканчивается первым.",
+        "trigger": {"border_lt": 75},
+        "weight": 5,
+        "bias": {"border": 2, "treasury": 1},
+        "choices": [
+            {"text": "Сжечь их лагерь и оставить знак.",
+             "effects": {"border": +10, "order": +2, "faith": -2, "treasury": -4, "tags_add": {"reprisal": 2}},
+             "outro": "Север понимает язык огня. Но огонь любит продолжения."},
+            {"text": "Выкупить мир подарками вождю.",
+             "effects": {"treasury": -8, "border": +6, "nobles": +2, "tags_add": {"bribe_tribe": 3}},
+             "outro": "Мир куплен. По цене, которая растёт со вкусом к покупке."},
+            {"text": "Сделать вид, что налётов нет.",
+             "effects": {"border": -8, "order": -2},
+             "outro": "Налёты существуют независимо от твоего мнения о них."},
+        ],
+    },
+
+    # --- Spymaster: nobles / intrigue ---
+    {
         "id": "noble_plot",
         "npc": "spymaster",
-        "title": "Знать играется в шахматы, где пешки — люди",
+        "domain": "nobles",
+        "severity": 3,
+        "title": "Знать играет в шахматы, где пешки — люди",
         "intro": "Шептун улыбается так, будто у него в кармане лежит твой завтрашний день.\n\n"
-                 "«Ваше Величество, у трёх домов внезапно совпали интересы. "
-                 "Обычно такое бывает либо перед свадьбой, либо перед убийством».\n\n"
-                 "Речь о коалиции ‘против хаоса’. Читай: ‘против тебя, если получится’.",
+                 "«Три дома внезапно совпали интересами. Обычно так бывает либо перед свадьбой, либо перед убийством».\n\n"
+                 "Коалиция ‘против хаоса’ звучит благородно. Особенно для тех, кто хаос и устроит.",
         "trigger": {"nobles_lt": 65},
         "weight": 6,
         "bias": {"nobles": 3},
         "choices": [
-            {
-                "text": "Купить лояльность: титулы, льготы, улыбки.",
-                "effects": {"treasury": -8, "nobles": +16, "doom": +1, "tags_add": {"noble_concessions": 3}},
-                "outro": "Они кланяются. Слишком низко — чтобы удобнее было ударить позже."
-            },
-            {
-                "text": "Показательный суд. Пусть страх заменит уважение.",
-                "effects": {"order": +8, "nobles": -6, "faith": -2, "doom": +2, "tags_add": {"purge": 3}},
-                "outro": "Правосудие звучит красиво. Особенно когда оно говорит твоим голосом."
-            },
-            {
-                "text": "Пустить слухи внутри знати. Пусть грызут друг друга.",
-                "effects": {"nobles": +6, "order": -2, "doom": +1, "tags_add": {"court_rumours": 3}},
-                "outro": "Интриги — как яды: малые дозы лечат, большие — делают тебя похожим на тех, кого ты презираешь."
-            },
+            {"text": "Купить лояльность: титулы, льготы, улыбки.",
+             "effects": {"treasury": -8, "nobles": +16, "tags_add": {"noble_concessions": 3}},
+             "outro": "Они кланяются. Слишком низко — чтобы удобнее было ударить позже."},
+            {"text": "Показательный суд. Пусть страх заменит уважение.",
+             "effects": {"order": +8, "nobles": -6, "faith": -2, "tags_add": {"purge": 3}},
+             "outro": "Правосудие звучит красиво. Особенно когда оно говорит твоим голосом."},
+            {"text": "Стравить дома слухами.",
+             "effects": {"nobles": +6, "order": -2, "tags_add": {"court_rumours": 3}},
+             "outro": "Интриги — как яды: малые дозы лечат, большие — делают тебя похожим на них."},
         ],
     },
     {
+        "id": "heir_scandal",
+        "npc": "spymaster",
+        "domain": "nobles",
+        "severity": 2,
+        "title": "Скандал вокруг наследника (не твоего, но шумно)",
+        "intro": "Шептун шепчет так, что слова режут воздух.\n\n"
+                 "«Наследник дома Лисихов замечен в храме… и в борделе… и снова в храме. "
+                 "Порядок событий спорный, но публика уже выбрала самое смешное».\n\n"
+                 "Если позволить скандалу жить — он вырастет до политической программы.",
+        "trigger": {"nobles_lt": 75},
+        "weight": 4,
+        "bias": {"nobles": 2, "faith": 1},
+        "choices": [
+            {"text": "Замять золотом и брачным договором.",
+             "effects": {"treasury": -6, "nobles": +10, "faith": -2, "tags_add": {"hush_money": 2}},
+             "outro": "Скандал умирает тихо. История — остаётся, как плесень."},
+            {"text": "Сделать из него урок: публичное покаяние.",
+             "effects": {"faith": +6, "nobles": +6, "order": +2},
+             "outro": "Толпа получает спектакль. Дома получают сигнал: ‘трон режиссирует’."},
+            {"text": "Пустить на самотёк — не моё дело.",
+             "effects": {"nobles": -6, "order": -2},
+             "outro": "Ты не вмешался. Скандал вмешался."},
+        ],
+    },
+
+    # --- Bishop: faith / unity ---
+    {
         "id": "heresy",
         "npc": "bishop",
+        "domain": "faith",
+        "severity": 2,
         "title": "Ересь, которая умеет улыбаться",
-        "intro": "Архиепископиня ставит на стол чашу с пеплом. Пахнет благовониями и приговором.\n\n"
-                 "«В кварталах расползается новая вера. "
-                 "Они говорят, что Пламя должно согревать, а не сжигать. "
+        "intro": "Архиепископиня ставит на стол чашу с пеплом.\n\n"
+                 "«В кварталах расползается новая вера. Они говорят, что Пламя должно согревать, а не сжигать. "
                  "Опасные люди — они звучат разумно».\n\n"
-                 "Религия — это всегда политика, только в красивой одежде.",
+                 "Религия — это политика в красивой одежде.",
         "trigger": {"faith_lt": 65},
         "weight": 6,
         "bias": {"faith": 3, "order": 1},
         "choices": [
-            {
-                "text": "Разрешить проповеди. Но под надзором.",
-                "effects": {"faith": +6, "order": -2, "nobles": +1, "doom": +1, "tags_add": {"toleration": 3}},
-                "outro": "Город учится спорить словами, а не кострами. Иногда это даже работает."
-            },
-            {
-                "text": "Запретить и карать. Быстро и страшно.",
-                "effects": {"order": +6, "faith": -4, "public_fear": 0, "doom": +2, "tags_add": {"inquisition": 3}},
-                "outro": "Костры теплее. Город — холоднее."
-            },
-            {
-                "text": "Устроить общий праздник веры. Пусть единство станет привычкой.",
-                "effects": {"treasury": -6, "faith": +12, "order": +2, "doom": +1, "tags_add": {"festival": 2}},
-                "outro": "Толпа поёт. И на один вечер перестаёт искать врага."
-            },
+            {"text": "Разрешить проповеди, но под надзором.",
+             "effects": {"faith": +6, "order": -2, "nobles": +1, "tags_add": {"toleration": 3}},
+             "outro": "Город учится спорить словами, а не кострами. Иногда это даже работает."},
+            {"text": "Запретить и карать.",
+             "effects": {"order": +6, "faith": -4, "tags_add": {"inquisition": 3}},
+             "outro": "Костры теплее. Город — холоднее."},
+            {"text": "Праздник веры: единство как привычка.",
+             "effects": {"treasury": -6, "faith": +12, "order": +2, "tags_add": {"festival": 2}},
+             "outro": "Толпа поёт. И на один вечер перестаёт искать врага."},
         ],
     },
     {
+        "id": "black_relic",
+        "npc": "bishop",
+        "domain": "faith",
+        "severity": 3,
+        "title": "Чёрная реликвия в лавке старьёвщика",
+        "intro": "Архиепископиня держит свёрток так, будто он кусается.\n\n"
+                 "«В городе продают реликвию. Называют её ‘Кость Святого’. "
+                 "Удивительно: святой, судя по запаху, умер вчера и был крайне зол».\n\n"
+                 "Если это подделка — вера треснет. Если не подделка — треснет кое-что ещё.",
+        "trigger": {"faith_lt": 75},
+        "weight": 5,
+        "bias": {"faith": 2, "order": 1},
+        "choices": [
+            {"text": "Изъять реликвию и спрятать в храме.",
+             "effects": {"faith": +8, "order": +2, "treasury": -2, "tags_add": {"sealed_relic": 3}},
+             "outro": "Реликвия исчезает. Слухи — нет."},
+            {"text": "Объявить её подделкой и наказать торговца.",
+             "effects": {"order": +6, "faith": +2, "nobles": -2, "tags_add": {"public_trial": 2}},
+             "outro": "Город получает виновного. Истина получает выходной."},
+            {"text": "Продать обратно ‘народу’. Пусть вера станет экономикой.",
+             "effects": {"treasury": +6, "faith": -6, "order": -2},
+             "outro": "Казна радуется. Алтари — помнят."},
+        ],
+    },
+
+    # --- Reeve: order / common folk ---
+    {
         "id": "bandits",
         "npc": "reeve",
+        "domain": "order",
+        "severity": 2,
         "title": "Разбойники и очень убедительная бедность",
-        "intro": "Староста приходит без поклонов — но с корзиной жалоб.\n\n"
-                 "«Ваше Величество, на дорогах такие ‘сборщики’, что даже мы бы так не смогли. "
+        "intro": "Староста приносит корзину жалоб.\n\n"
+                 "«На дорогах такие ‘сборщики’, что даже мы бы так не смогли. "
                  "Люди платят дважды: разбойникам — деньгами, нам — нервами».\n\n"
-                 "Если порядок падает, у государства появляется хобби: разваливаться.",
+                 "Если порядок падает, государство заводит хобби: разваливаться.",
         "trigger": {"order_lt": 65},
         "weight": 7,
         "bias": {"order": 3},
         "choices": [
-            {
-                "text": "Усилить стражу и патрули.",
-                "effects": {"treasury": -6, "order": +14, "nobles": -1, "doom": +1, "tags_add": {"patrols": 3}},
-                "outro": "Дороги становятся безопаснее. Некоторым это даже мешает работать."
-            },
-            {
-                "text": "Амнистия: принять часть разбойников в ополчение.",
-                "effects": {"order": +8, "border": +2, "nobles": -2, "doom": +1, "tags_add": {"militia": 3}},
-                "outro": "Вчерашние преступники маршируют строем. Вопрос только — куда повернут оружие завтра."
-            },
-            {
-                "text": "Снизить налоги на деревни. Пусть бедность не вербует врагов.",
-                "effects": {"treasury": -8, "order": +6, "health": +2, "doom": +1, "tags_add": {"tax_relief": 3}},
-                "outro": "Люди меньше злятся. Казна — больше."
-            },
+            {"text": "Усилить стражу и патрули.",
+             "effects": {"treasury": -6, "order": +14, "nobles": -1, "tags_add": {"patrols": 3}},
+             "outro": "Дороги безопаснее. Некоторым это даже мешает работать."},
+            {"text": "Амнистия: принять часть разбойников в ополчение.",
+             "effects": {"order": +8, "border": +2, "nobles": -2, "tags_add": {"militia": 3}},
+             "outro": "Вчерашние преступники маршируют строем. Вопрос только — куда повернут оружие завтра."},
+            {"text": "Снизить налоги на деревни.",
+             "effects": {"treasury": -8, "order": +6, "health": +2, "tags_add": {"tax_relief": 3}},
+             "outro": "Люди меньше злятся. Казна — больше."},
+        ],
+    },
+    {
+        "id": "night_market",
+        "npc": "reeve",
+        "domain": "order",
+        "severity": 2,
+        "title": "Ночной рынок: всё законно, если не смотреть",
+        "intro": "Староста ставит на стол мешочек странно знакомых монет.\n\n"
+                 "«Ваше, у нас ‘ночной рынок’. Там продают всё: от хлеба до молитв. "
+                 "И всё — без налогов, разумеется. Стража делает вид, что это театр».\n\n"
+                 "Можно закрыть. Можно крышевать. Можно… не знать.",
+        "trigger": {"order_lt": 75},
+        "weight": 5,
+        "bias": {"order": 2, "treasury": 1},
+        "choices": [
+            {"text": "Разогнать лавки и наказать стражу.",
+             "effects": {"order": +10, "treasury": -2, "nobles": -2},
+             "outro": "Закон становится громче. Тени — злее."},
+            {"text": "Ввести ‘ночную лицензию’ и забрать долю в казну.",
+             "effects": {"treasury": +8, "order": -2, "faith": -2, "tags_add": {"licensed_smuggling": 3}},
+             "outro": "Казна пополняется. Репутация — тоже, но не в твою пользу."},
+            {"text": "Не трогать. У людей должен быть клапан.",
+             "effects": {"order": -4, "health": +2},
+             "outro": "Клапан работает. Иногда он шипит в лицо."},
         ],
     },
 ]
 
-# Note: One event/day is enough for clarity.
-
 
 # -----------------------------
-# Daily generation
+# System drift & decay logic (now more “event + choice” driven)
 # -----------------------------
-def eligible_events(k: Kingdom) -> List[dict]:
-    evs = []
-    for ev in EVENTS:
-        if trig_ok(k, ev.get("trigger", {})):
-            evs.append(ev)
-    # fallback if nothing eligible: pick a random "pressure" event by removing triggers
-    if not evs:
-        evs = EVENTS[:]
-    return evs
+def event_resolution_decay_delta(k: Kingdom, before: dict, after: dict, ev: dict) -> Tuple[int, List[str]]:
+    """
+    Clear logic:
+    - Each daily event has domain + severity.
+    - If after-domain still RED (<40): decay increases by severity (crisis not contained).
+    - If domain improved from RED to >=40: decay decreases by 1 (crisis contained).
+    - If domain fell into RED due to your decision: decay increases by 1 (you opened a wound).
+    """
+    reasons: List[str] = []
+    delta = 0
+    domain = ev.get("domain")
+    severity = int(ev.get("severity", 1))
 
-def pick_event(k: Kingdom) -> dict:
-    rng = k.rng()
-    evs = eligible_events(k)
-    weights = [weight_for_event(k, ev) for ev in evs]
-    # avoid all zero
-    if sum(weights) <= 0:
-        weights = [1 for _ in evs]
-    chosen = rng.choices(evs, weights=weights, k=1)[0]
-    return chosen
+    if domain and domain in after and domain in before:
+        b = int(before[domain])
+        a = int(after[domain])
 
+        if a < YELLOW:
+            delta += severity
+            reasons.append(f"кризис дня не купирован ({STAT_LABELS.get(domain, domain)} в 🔴) +{severity}")
+        if b < YELLOW and a >= YELLOW:
+            delta -= 1
+            reasons.append(f"кризис дня приглушён ({STAT_LABELS.get(domain, domain)} вышла из 🔴) -1")
+        if b >= YELLOW and a < YELLOW:
+            delta += 1
+            reasons.append(f"ты открыл новую рану ({STAT_LABELS.get(domain, domain)} упала в 🔴) +1")
 
-# -----------------------------
-# System drift & escalations (guarantee a "state" by day 7)
-# -----------------------------
-def red_count(k: Kingdom) -> int:
-    return sum(1 for v in (k.treasury, k.order, k.health, k.nobles, k.faith, k.border) if v < YELLOW)
+    return delta, reasons
 
-def green_count(k: Kingdom) -> int:
-    return sum(1 for v in (k.treasury, k.order, k.health, k.nobles, k.faith, k.border) if v >= GREEN)
+def global_state_decay_delta(k: Kingdom) -> Tuple[int, List[str]]:
+    """
+    Global nightly effect (small, but intuitive):
+    - If 2+ red zones: decay +1
+    - If all green: decay -1
+    """
+    reds = red_count(k)
+    greens = green_count(k)
+    reasons: List[str] = []
+    delta = 0
+    if reds >= 2:
+        delta += 1
+        reasons.append("в государстве 2+ 🔴 зон +1")
+    if greens == 6:
+        delta -= 1
+        reasons.append("все показатели в 🟢 зоне -1")
+    return delta, reasons
 
 def system_end_of_day(k: Kingdom, rng: random.Random) -> List[str]:
     """
-    Small, readable systemic consequences.
-    Also ensures we drift towards a decisive 7-day outcome.
+    Light drift that makes the kingdom feel alive, without hiding causality.
     """
     beats: List[str] = []
 
-    # base upkeep / gravity
-    k.treasury -= 2  # the kingdom eats coins
-    k.order -= 1 if k.has_tag("tax_hike") else 0
-    k.health -= 1 if k.has_tag("quarantine") else 0  # quarantine has costs
-    k.border -= 1  # threats never sleep
+    # upkeep / gravity
+    k.treasury -= 2
+    k.border -= 1
 
-    # cross-couplings (light)
+    # tag side-effects (small, readable)
+    if k.has_tag("tax_hike"):
+        k.order -= 1
+    if k.has_tag("quarantine"):
+        k.treasury -= 1
+        k.order -= 1
+    if k.has_tag("licensed_smuggling"):
+        k.order -= 1
+    if k.has_tag("purge"):
+        k.nobles -= 1
+        k.faith -= 1
+
+    # cross-couplings
     if k.order < YELLOW:
         k.treasury -= 1
         k.health -= 1
@@ -526,112 +698,25 @@ def system_end_of_day(k: Kingdom, rng: random.Random) -> List[str]:
         k.order -= 1
     if k.treasury < YELLOW:
         k.order -= 1
+    if k.border < YELLOW:
+        k.order -= 1
 
-    # decay logic (primary)
-    reds = red_count(k)
-    greens = green_count(k)
-    if reds >= 2:
-        k.decay += 1
-        beats.append("Ночь проходит тяжело: когда в королевстве горит сразу в двух местах, дым неизбежно находит трон.")
-    elif greens == 6:
-        k.decay = max(0, k.decay - 1)
-        beats.append("Ночь редкая: тишина без шёпота. Даже крысы шуршат аккуратнее.")
-
-    # doom ramp: pushes toward decisive ending by day 7 (without feeling random)
-    # doom grows when you oscillate or postpone problems
-    if k.day >= 3:
-        k.doom += 1
-    if reds >= 3:
-        k.doom += 1
-    if k.has_tag("austerity") and k.has_tag("purge"):
-        k.doom += 1  # harsh ruler reputation accelerates instability
-
-    # escalation incidents (rare but meaningful)
-    if k.order < 30 and rng.random() < 0.35:
-        beats.append("К ночи слышны крики: в одном из кварталов ‘самоорганизовались’. Порядок — это не вещь, это договор.")
+    # rare escalations (not random noise; only when deep red)
+    if k.order < 30 and rng.random() < 0.30:
+        beats.append("К ночи слышны крики: в одном из кварталов ‘самоорганизовались’. Порядок — договор, а не предмет.")
         k.order -= 6
         k.treasury -= 3
-        k.decay += 1
-    if k.health < 30 and rng.random() < 0.35:
+    if k.health < 30 and rng.random() < 0.30:
         beats.append("К рассвету город пахнет уксусом и травами. Беда входит без стука — и выходит не всегда.")
         k.health -= 6
         k.order -= 3
-        k.decay += 1
-    if k.border < 30 and rng.random() < 0.35:
+    if k.border < 30 and rng.random() < 0.30:
         beats.append("Север присылает ‘письмо’ стрелами. Пограничники отвечают молчанием: они заняты выживанием.")
         k.border -= 6
         k.treasury -= 2
-        k.decay += 1
 
     k.clamp()
     return beats
-
-
-# -----------------------------
-# Narration helpers
-# -----------------------------
-STAT_LABELS = {
-    "treasury": "Казна",
-    "order": "Порядок",
-    "health": "Здоровье",
-    "nobles": "Знать",
-    "faith": "Вера",
-    "border": "Граница",
-    "decay": "Упадок",
-    "doom": "Рок",
-}
-
-def deltas_line(deltas: Dict[str, int]) -> str:
-    # show only key stats
-    keys = ["treasury", "order", "health", "nobles", "faith", "border", "decay"]
-    parts = []
-    for k in keys:
-        if k in deltas and deltas[k] != 0:
-            d = deltas[k]
-            parts.append(f"{STAT_LABELS[k]} {'+' if d>0 else ''}{d}")
-    return " · ".join(parts) if parts else "Без заметных числовых сдвигов (редкая роскошь)."
-
-def hud_line(k: Kingdom) -> str:
-    return (
-        f"Казна {zone(k.treasury)}{k.treasury} | "
-        f"Порядок {zone(k.order)}{k.order} | "
-        f"Здоровье {zone(k.health)}{k.health}\n"
-        f"Знать {zone(k.nobles)}{k.nobles} | "
-        f"Вера {zone(k.faith)}{k.faith} | "
-        f"Граница {zone(k.border)}{k.border}\n"
-        f"**Упадок:** {k.decay}/10 · **Устойчивость:** {stability_score(k)}/100"
-    )
-
-def ending(k: Kingdom) -> str:
-    # decisive by day 7: either stable, collapse, or specific failure state.
-    if stable_state(k):
-        return (
-            "**ПОБЕДА: Королевство удержано.**\n\n"
-            "Ты не победил мир — ты сделал невозможное: **заставил его не развалиться**. "
-            "На этой неделе у государства не отвалились колёса… и это уже легенда.\n\n"
-            f"**Устойчивость:** {stability_score(k)}/100 · **Упадок:** {k.decay}/10"
-        )
-
-    # collapse condition
-    if k.decay >= 6 or red_count(k) >= 3:
-        worst_name, worst_v = worst_stat(k)
-        return (
-            "**ПОРАЖЕНИЕ: Упадок победил.**\n\n"
-            "Королевство не рушится красиво. Оно рушится *по счетам*: "
-            "хлеб исчезает, дороги пустеют, люди перестают верить даже в слухи.\n\n"
-            f"Самая больная точка: **{worst_name}** ({worst_v}).\n\n"
-            f"**Упадок:** {k.decay}/10 · **Устойчивость:** {stability_score(k)}/100"
-        )
-
-    # "hard but survived" ending
-    worst_name, worst_v = worst_stat(k)
-    return (
-        "**ФИНАЛ: На грани, но живы.**\n\n"
-        "Ты удержал трон, но королевство держится на костылях, молитвах и привычке людей терпеть. "
-        "Следующая неделя решит больше, чем эта.\n\n"
-        f"Самая слабая точка: **{worst_name}** ({worst_v}).\n\n"
-        f"**Упадок:** {k.decay}/10 · **Устойчивость:** {stability_score(k)}/100"
-    )
 
 
 # -----------------------------
@@ -660,7 +745,7 @@ def init_game(seed: int) -> Kingdom:
     k.day = 1
     k.max_days = 7
 
-    # Start in "manageable but tense" zone
+    # Start: manageable tension
     k.treasury = 55
     k.order = 55
     k.health = 55
@@ -668,26 +753,30 @@ def init_game(seed: int) -> Kingdom:
     k.faith = 55
     k.border = 55
     k.decay = 0
-    k.doom = 0
     k.tags = []
     k.log = []
 
     k.push(
         "narrator",
-        "**День первый — ‘Трон и табуретка’**\n\n"
-        "Ты — монарх. Королевство — организм, который требует золота, крови и времени. "
-        "Каждое утро к тебе приходят вести.\n\n"
-        "**Цель недели:** не допустить упадка государства. "
-        "Семь дней — и либо страна станет устойчивой, либо выберет более… естественное состояние."
+        "**День первый — ‘Трон, перо и неизбежность’**\n\n"
+        "Каждое утро вести стучатся в двери дворца.\n"
+        "Каждый указ — либо гвоздь в гроб беды, либо гвоздь в крышку государства.\n\n"
+        "**Семь дней** — и королевство станет устойчивым… или станет историей."
     )
     return k
 
+def pick_event(k: Kingdom) -> dict:
+    rng = k.rng()
+    evs = eligible_events(k, EVENTS)
+    weights = [weight_for_event(k, ev) for ev in evs]
+    if sum(weights) <= 0:
+        weights = [1 for _ in evs]
+    return rng.choices(evs, weights=weights, k=1)[0]
 
 def new_day_event(k: Kingdom):
     ev = pick_event(k)
     k.current_event = ev
     k.current_event_id = ev["id"]
-
 
 def snapshot(k: Kingdom) -> dict:
     return {
@@ -699,24 +788,62 @@ def snapshot(k: Kingdom) -> dict:
         "faith": k.faith,
         "border": k.border,
         "decay": k.decay,
-        "doom": k.doom,
         "tags": {t.name: t.days_left for t in k.tags},
         "event_id": k.current_event_id,
     }
 
-
 def diff(a: dict, b: dict) -> Dict[str, int]:
     out: Dict[str, int] = {}
-    for key in ("treasury", "order", "health", "nobles", "faith", "border", "decay", "doom"):
+    for key in ("treasury", "order", "health", "nobles", "faith", "border", "decay"):
         out[key] = int(b[key]) - int(a[key])
-    return {k: v for k, v in out.items() if v != 0}
+    return {kk: vv for kk, vv in out.items() if vv != 0}
 
+def deltas_line(deltas: Dict[str, int]) -> str:
+    keys = ["treasury", "order", "health", "nobles", "faith", "border", "decay"]
+    parts = []
+    for k in keys:
+        if k in deltas and deltas[k] != 0:
+            d = deltas[k]
+            parts.append(f"{STAT_LABELS[k]} {'+' if d>0 else ''}{d}")
+    return " · ".join(parts) if parts else "Сдвиги мелкие — но мелочи иногда и ломают короны."
+
+def hud_line(k: Kingdom) -> str:
+    return (
+        f"Казна {zone(k.treasury)}{k.treasury} | "
+        f"Порядок {zone(k.order)}{k.order} | "
+        f"Здоровье {zone(k.health)}{k.health}\n"
+        f"Знать {zone(k.nobles)}{k.nobles} | "
+        f"Вера {zone(k.faith)}{k.faith} | "
+        f"Граница {zone(k.border)}{k.border}\n"
+        f"**Упадок:** {k.decay}/10 · **Устойчивость:** {stability_score(k)}/100"
+    )
+
+def ending(k: Kingdom) -> str:
+    if stable_state(k):
+        return (
+            "**ПОБЕДА: Королевство удержано.**\n\n"
+            "Ты не победил мир — ты сделал невозможное: **заставил его не развалиться**.\n\n"
+            f"**Устойчивость:** {stability_score(k)}/100 · **Упадок:** {k.decay}/10"
+        )
+
+    if k.decay >= 6 or red_count(k) >= 3:
+        worst_name, worst_v = worst_stat(k)
+        return (
+            "**ПОРАЖЕНИЕ: Упадок победил.**\n\n"
+            "Государство рушится не красиво. Оно рушится по счетам.\n\n"
+            f"Самая больная точка: **{worst_name}** ({worst_v}).\n\n"
+            f"**Упадок:** {k.decay}/10 · **Устойчивость:** {stability_score(k)}/100"
+        )
+
+    worst_name, worst_v = worst_stat(k)
+    return (
+        "**ФИНАЛ: На грани, но живы.**\n\n"
+        "Ты удержал трон, но королевство держится на костылях, молитвах и привычке людей терпеть.\n\n"
+        f"Самая слабая точка: **{worst_name}** ({worst_v}).\n\n"
+        f"**Упадок:** {k.decay}/10 · **Устойчивость:** {stability_score(k)}/100"
+    )
 
 def play_choice(k: Kingdom, choice_idx: int) -> Tuple[Optional[str], List[str]]:
-    """
-    Player chooses option for today's event.
-    Produce ONE narrator message.
-    """
     rng = k.rng()
     ev = k.current_event
     if not ev:
@@ -724,6 +851,7 @@ def play_choice(k: Kingdom, choice_idx: int) -> Tuple[Optional[str], List[str]]:
         ev = k.current_event
 
     before = snapshot(k)
+    before_decay = k.decay
 
     k.buffer_start()
 
@@ -732,54 +860,71 @@ def play_choice(k: Kingdom, choice_idx: int) -> Tuple[Optional[str], List[str]]:
 
     # Apply choice
     ch = ev["choices"][choice_idx]
-    # primary effects
-    deltas_applied = apply_effects(k, ch["effects"])
-    # small “flavor” consequences based on tags/conditions
-    if k.has_tag("tax_hike") and k.order < GREEN:
-        k.order -= 1
-        k.doom += 1
+    apply_effects(k, ch["effects"])
+    k.push("npc", ch.get("outro", "Указ произнесён. Мир моргнул — и записал это в книгу последствий."))
 
-    # Put choice outro beat
-    k.push("world", ch.get("outro", "Решение принято. Королевство делает пометку напротив твоего имени."))
+    # System drift
+    drift_beats = system_end_of_day(k, rng)
+    for b in drift_beats:
+        k.push("npc", b)
 
-    # System end-of-day drift and escalations
-    beats = system_end_of_day(k, rng)
-    for b in beats:
-        k.push("world", b)
+    # Decay update (event-driven + global)
+    # 1) event resolution delta (based on domain outcome)
+    after_mid = snapshot(k)
+    ev_delta, ev_reasons = event_resolution_decay_delta(k, before, after_mid, ev)
 
-    # Tick tags AFTER day passes
+    # 2) global delta (based on red zones / all green)
+    gl_delta, gl_reasons = global_state_decay_delta(k)
+
+    # Apply and clamp
+    k.decay += ev_delta + gl_delta
+    k.clamp()
+
+    # Explain decay changes clearly
+    decay_change = k.decay - before_decay
+    decay_explain = ""
+    reasons = ev_reasons + gl_reasons
+    if decay_change != 0:
+        sign = "+" if decay_change > 0 else ""
+        if reasons:
+            decay_explain = f"**Почему упадок {sign}{decay_change}:** " + "; ".join(reasons) + "."
+        else:
+            decay_explain = f"**Почему упадок {sign}{decay_change}:** так сложились обстоятельства (и твой указ)."
+    else:
+        decay_explain = "**Упадок не изменился:** сегодня ты не усилил трещины — и не залечил их до конца."
+
+    # tick tags
     k.tick_tags()
 
     # Advance day
     k.day += 1
     k.clamp()
-
     after = snapshot(k)
-    deltas = diff(before, after)
 
-    # Create ONE narrator response
+    # Compose ONE narrator response
     buffered = k.buffer_end()
 
-    # Choose 1–2 most important beats from buffer for readability
-    # Prioritize systemic escalation lines and the choice outro.
-    important = []
-    for t in buffered:
-        if "Ночь проходит тяжело" in t or "К ночи" in t or "К рассвету" in t or "Север" in t:
-            important.append(t)
+    # Pick two readable beats: choice outro + (maybe) one drift escalation
+    beats = []
     if ch.get("outro"):
-        important.insert(0, ch["outro"])
+        beats.append(ch["outro"])
+    for t in buffered:
+        if "К ночи слышны" in t or "К рассвету" in t or "Север присылает" in t:
+            beats.append(t)
+            break
+    beats = beats[:2] if beats else buffered[:2]
 
-    important = important[:2] if important else buffered[:2]
+    deltas = diff(before, after)
 
     narrator_text = (
-        f"**День {before['day']} → день {after['day']}**\n\n"
-        + "\n\n".join(important).strip()
+        f"**День {before['day']} завершён**\n\n"
+        + "\n\n".join(beats).strip()
         + "\n\n"
         + f"**Сдвиги:** {deltas_line(deltas)}\n\n"
+        + decay_explain
+        + "\n\n"
         + hud_line(k)
     )
-
-    # Push compact narrator response into main log
     k.push("narrator", narrator_text)
 
     # Analytics
@@ -789,14 +934,16 @@ def play_choice(k: Kingdom, choice_idx: int) -> Tuple[Optional[str], List[str]]:
         "event_id": ev["id"],
         "choice_idx": choice_idx,
         "choice_text": ch["text"],
-        "before": {k2: before[k2] for k2 in ("treasury","order","health","nobles","faith","border","decay","doom")},
-        "after": {k2: after[k2] for k2 in ("treasury","order","health","nobles","faith","border","decay","doom")},
+        "domain": ev.get("domain"),
+        "severity": ev.get("severity"),
+        "before": {kk: before[kk] for kk in ("treasury","order","health","nobles","faith","border","decay")},
+        "after": {kk: after[kk] for kk in ("treasury","order","health","nobles","faith","border","decay")},
         "deltas": deltas,
+        "decay_reason": reasons,
         "stability_score": stability_score(k),
         "red_count": red_count(k),
     })
 
-    # Ending?
     end = None
     if k.day > k.max_days:
         end = ending(k)
@@ -819,15 +966,6 @@ st.set_page_config(page_title="Majesty-proto: Король и Вести", layou
 st.markdown("""
 <style>
 .block-container { padding-top: 1.0rem; max-width: 1200px; }
-.hud-card {
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 14px;
-  padding: 12px 12px;
-  margin-bottom: 10px;
-  background: rgba(255,255,255,0.02);
-}
-.hud-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 6px; opacity: 0.95; }
-.hud-small { font-size: 0.85rem; opacity: 0.85; }
 .chat-feed {
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 14px;
@@ -840,11 +978,13 @@ st.markdown("""
   padding: 12px 12px;
   background: rgba(255,255,255,0.02);
 }
+.small { font-size: 0.9rem; opacity: 0.85; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("👑 Majesty-подобный прототип: Король и ежедневные вести")
-st.caption("Ироничное фэнтези с нотками dark fantasy. 7 дней. 1 весть в день. Цель — не допустить упадка.")
+st.title("👑 Король и Вести — Неделя, что ломает короны")
+st.caption("**Семь дней тебе дано — держи державу, как клинок:** "
+           "*чуть дрогнешь — и он режет; удержишь — и поёт.*")
 
 with st.sidebar:
     st.header("Сессия")
@@ -854,20 +994,14 @@ with st.sidebar:
         st.session_state["k"] = init_game(seed)
         st.session_state["ending"] = None
         st.session_state["debug_last"] = []
-        # first day event
         new_day_event(st.session_state["k"])
         st.toast("Партия началась", icon="🌍")
 
     st.divider()
     st.subheader("Аналитика")
-    st.caption("Логи пишутся в `./analytics/<session>.jsonl`")
+    st.caption("Логи: `./analytics/<session>.jsonl`")
     if "k" in st.session_state:
         st.code(analytics_path(st.session_state["k"]), language="text")
-
-    st.divider()
-    st.subheader("Пояснение зон")
-    st.caption("🟢 ≥60, 🟡 40–59, 🔴 <40. Упадок растёт при 2+ красных параметрах.")
-
 
 if "k" not in st.session_state:
     st.session_state["k"] = init_game(42)
@@ -877,32 +1011,42 @@ if "k" not in st.session_state:
 
 k: Kingdom = st.session_state["k"]
 
+# ---- Top horizontal kingdom indicators ----
+top = st.columns(7)
+top[0].metric("Казна", f"{zone(k.treasury)} {k.treasury}")
+top[1].metric("Порядок", f"{zone(k.order)} {k.order}")
+top[2].metric("Здоровье", f"{zone(k.health)} {k.health}")
+top[3].metric("Знать", f"{zone(k.nobles)} {k.nobles}")
+top[4].metric("Вера", f"{zone(k.faith)} {k.faith}")
+top[5].metric("Граница", f"{zone(k.border)} {k.border}")
+top[6].metric("Упадок", f"{k.decay}/10")
+
+st.markdown(f"<div class='small'><b>Устойчивость:</b> {stability_score(k)}/100 · <b>День:</b> {k.day}/{k.max_days}</div>", unsafe_allow_html=True)
+
+# ---- Main layout: chat left, daily news right ----
 left, right = st.columns([0.68, 0.32], gap="large")
 
 with right:
-    st.markdown('<div class="hud-card">', unsafe_allow_html=True)
-    st.markdown('<div class="hud-title">Королевство</div>', unsafe_allow_html=True)
+    st.subheader("Весть дня")
+    if not k.current_event or k.current_event_id is None:
+        new_day_event(k)
+    ev = k.current_event
 
-    st.metric("Казна", f"{zone(k.treasury)} {k.treasury}")
-    st.metric("Порядок", f"{zone(k.order)} {k.order}")
-    st.metric("Здоровье", f"{zone(k.health)} {k.health}")
-    st.metric("Знать", f"{zone(k.nobles)} {k.nobles}")
-    st.metric("Вера", f"{zone(k.faith)} {k.faith}")
-    st.metric("Граница", f"{zone(k.border)} {k.border}")
-
-    st.markdown(f"**Упадок:** {k.decay}/10")
-    st.markdown(f"**Устойчивость:** {stability_score(k)}/100")
-    st.markdown(f"**День:** {k.day}/{k.max_days}")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    st.markdown('<div class="hud-card">', unsafe_allow_html=True)
-    st.markdown('<div class="hud-title">Активные следы решений</div>', unsafe_allow_html=True)
-    if not k.tags:
-        st.markdown("<span class='hud-small'>Пока ничего не прилипло. Редкая удача.</span>", unsafe_allow_html=True)
+    if ev:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(f"{npc_header(ev['npc'])}")
+        st.markdown(f"**{ev['title']}**")
+        st.markdown(ev["intro"])
+        st.markdown("</div>", unsafe_allow_html=True)
     else:
-        for t in k.tags:
-            st.markdown(f"- `{t.name}` ещё **{t.days_left}** дн.")
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.info("Сегодня вестей нет. Это подозрительно.")
+
+    with st.expander("Активные следы решений"):
+        if not k.tags:
+            st.caption("Пока ничего не прилипло.")
+        else:
+            for t in k.tags:
+                st.markdown(f"- `{t.name}` ещё **{t.days_left}** дн.")
 
     with st.expander("Отладка: сырой буфер прошлого хода"):
         if not st.session_state.get("debug_last"):
@@ -912,7 +1056,6 @@ with right:
                 st.markdown(line)
                 st.divider()
 
-
 with left:
     st.subheader(f"Двор: день {k.day}/{k.max_days}")
 
@@ -921,12 +1064,9 @@ with left:
         st.markdown(st.session_state["ending"])
         st.info("Нажми **Новая партия** в сайдбаре, чтобы начать заново.")
 
-    # Chat feed
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        chat_height = st.slider("Высота ленты", 350, 900, 650, 50, key="chat_height")
-    with c2:
-        render_last = st.slider("Сообщений", 20, 200, 80, 10, key="render_last")
+    # Chat feed (default height 350; controls moved to bottom)
+    chat_height = st.session_state.get("chat_height", 350)
+    render_last = st.session_state.get("render_last", 80)
 
     feed = st.container(height=chat_height)
     with feed:
@@ -940,22 +1080,11 @@ with left:
                     st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Event card + choices
-    st.markdown("### Весть дня")
-    disabled = bool(st.session_state["ending"]) or (k.day > k.max_days)
+    # Choices area (under chat; event shown on the right)
+    st.markdown("### Решение трона")
+    disabled = bool(st.session_state["ending"]) or (k.day > k.max_days) or (k.current_event is None)
 
-    if not k.current_event or k.current_event_id is None:
-        new_day_event(k)
-
-    ev = k.current_event
     if ev:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown(f"{npc_header(ev['npc'])}")
-        st.markdown(f"**{ev['title']}**")
-        st.markdown(ev["intro"])
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown("### Решение трона")
         choice_texts = [c["text"] for c in ev["choices"]]
         choice_idx = st.radio(
             "",
@@ -969,29 +1098,27 @@ with left:
         b1, b2 = st.columns([1, 1])
         with b1:
             if st.button("Издать указ", type="primary", use_container_width=True, disabled=disabled):
-                # player message
                 k.push("player", f"Я решаю: **{choice_texts[choice_idx]}**")
                 end, debug_lines = play_choice(k, choice_idx)
                 st.session_state["debug_last"] = debug_lines
                 st.session_state["ending"] = end
-
-                # Next day: pick next event if game continues
                 if not st.session_state["ending"] and k.day <= k.max_days:
                     new_day_event(k)
                 st.rerun()
 
         with b2:
             if st.button("Пропустить (плохая идея)", use_container_width=True, disabled=disabled):
-                # Treat skip as a weak "do nothing": costs + doom
-                k.push("player", "Я решаю: **ничего не делать** (и надеюсь, что мир сам исправится).")
-                # Fabricate a minimal "event" on skip
+                k.push("player", "Я решаю: **ничего не делать** (и надеюсь, что беда стесняется).")
+                # Skip creates a mini-event that is always "unresolved"
                 k.current_event = {
                     "id": "skip",
                     "npc": "chancellor",
+                    "domain": "order",
+                    "severity": 2,
                     "title": "Тишина (которая тоже событие)",
                     "intro": "Во дворце тихо. Это плохая тишина — когда слышно, как государство скрипит.",
                     "choices": [
-                        {"text": "…", "effects": {"treasury": -2, "order": -2, "doom": +2}, "outro": "Ты ничего не сделал. Мир сделал выводы."}
+                        {"text": "…", "effects": {"treasury": -2, "order": -2}, "outro": "Ты ничего не сделал. Мир сделал выводы."}
                     ],
                 }
                 k.current_event_id = "skip"
@@ -1001,5 +1128,9 @@ with left:
                 if not st.session_state["ending"] and k.day <= k.max_days:
                     new_day_event(k)
                 st.rerun()
-    else:
-        st.info("Нет вестей — странно. Обычно они сами находят трон.")
+
+    # Hidden chat controls at the very bottom
+    with st.expander("Настройки ленты (не трогать без нужды)"):
+        st.session_state["chat_height"] = st.slider("Высота ленты", 250, 900, int(chat_height), 50)
+        st.session_state["render_last"] = st.slider("Сколько сообщений показывать", 20, 200, int(render_last), 10)
+        st.caption("🟢 ≥60, 🟡 40–59, 🔴 <40. Упадок растёт, если кризис дня не купирован и/или есть 2+ 🔴 зоны.")
