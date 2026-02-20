@@ -1084,7 +1084,7 @@ with left:
         with b1:
             if st.button("Издать указ", type="primary", use_container_width=True, disabled=disabled):
                 st.session_state["prev_log_len"] = len(k.log)
-            k.push("player", f"Я решаю: **{choice_texts[choice_idx]}**")
+                k.push("player", f"Я решаю: **{choice_texts[choice_idx]}**")
                 end = play_choice(k, choice_idx)
                 st.session_state["ending"] = end
                 if not st.session_state["ending"] and k.day <= k.max_days:
@@ -1094,7 +1094,7 @@ with left:
         with b2:
             if st.button("Пропустить (плохая идея)", use_container_width=True, disabled=disabled):
                 st.session_state["prev_log_len"] = len(k.log)
-            k.push("player", "Я решаю: **ничего не делать** (и надеюсь, что беда стесняется).")
+                k.push("player", "Я решаю: **ничего не делать** (и надеюсь, что беда стесняется).")
                 k.current_event = {
                     "id": "skip",
                     "npc": "chancellor",
