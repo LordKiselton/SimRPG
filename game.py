@@ -839,9 +839,8 @@ def deltas_line_readable(deltas: Dict[str, int]) -> str:
         if k in deltas and deltas[k] != 0:
             d = int(deltas[k])
             color = "#22c55e" if d > 0 else "#ef4444"
-            sign = "+" if d > 0 else "−"
             parts.append(
-                f"<span style='color:{color}; font-weight:700'>{STAT_LABELS[k]} {sign}</span>"
+                f"<span style='color:{color}; font-weight:700'>{STAT_LABELS[k]} {_delta_arrows(d)}</span>"
             )
     return " · ".join(parts) if parts else "Сдвиги тихие. Это не значит — добрые."
 
@@ -904,71 +903,61 @@ def enhanced_ending(k: Kingdom, reasons: list[str]) -> str:
         f"И так завершилась неделя, где каждое слово стоило крови, а каждый указ — сна."
     )
 
-def _ending_pick_best_worst(k: Kingdom) -> Tuple[str, str]:
-    stats = {
-        "treasury": k.treasury,
-        "order": k.order,
-        "health": k.health,
-        "nobles": k.nobles,
-        "faith": k.faith,
-        "border": k.border,
-    }
-    best_key = max(stats.items(), key=lambda kv: kv[1])[0]
-    worst_key = min(stats.items(), key=lambda kv: kv[1])[0]
-    return best_key, worst_key
-
-def _ending_stat_flair(stat_key: str, kind: str) -> str:
-    best = {
-        "treasury": "Казна ещё дышит — звон монет звучит, как редкий смех в склепе.",
-        "order": "Порядок держится — пока ещё люди верят, что закон не анекдот.",
-        "health": "Народ держится — кашель не стал гимном, и это уже праздник для мрачных.",
-        "nobles": "Знать кланяется — на этот раз без явного скрипа клинков за спиной. Почти.",
-        "faith": "Вера не рассыпалась в пепел — свечи горят, и город не грызёт себя до кости.",
-        "border": "Граница молчит — а молчание севера, как ни странно, сегодня добрая новость.",
-    }
-    worst = {
-        "treasury": "Казна хрипит: в сундуках сквозняк, и даже крысы смотрят с жалостью.",
-        "order": "Порядок трещит: закон звучит как шутка, и смеются не те, кто должен.",
-        "health": "Здоровье народа — свеча на ветру. Ветер, увы, образован и настойчив.",
-        "nobles": "Знать улыбается — той самой улыбкой, которой обычно заканчиваются эпохи.",
-        "faith": "Вера надломлена: молитвы стали короче, а подозрения — длиннее.",
-        "border": "Граница кровоточит: север пишет письма стрелами, и почта работает без выходных.",
-    }
-    return (best if kind == "best" else worst).get(stat_key, "")
+def _ending_cause(k: Kingdom, worst_key: str) -> str:
+    # No numbers; pick a readable "main reason" for the epilogue.
+    reds = red_count(k)
+    if stable_state(k):
+        return "Ты не победил беду — ты заставил её говорить шёпотом."
+    if reds >= 3:
+        return "Королевство утонуло не в буре, а в трёх мелких пожарах сразу."
+    if k.decay >= 6:
+        return "Каждый день ты тушил не тот угол — и дом выбрал падать целиком."
+    # edge case
+    return f"Трещина росла там, где слабее всего держалась {STAT_LABELS.get(worst_key, worst_key).lower()}."
 
 def ending(k: Kingdom) -> str:
     best_key, worst_key = _ending_pick_best_worst(k)
+    win = stable_state(k)
     collapse = (k.decay >= 6) or (red_count(k) >= 3)
 
-    if stable_state(k):
-        return f"""✨🏰 **ПОБЕДА**
+    best = STAT_LABELS.get(best_key, best_key)
+    worst = STAT_LABELS.get(worst_key, worst_key)
 
-Неделя прожита. Корона не упала — значит, мир сегодня ошибся в расчётах.
-Ты не исправил судьбу. Ты просто **не дал ей закончить фразу**.
+    best_flair = _ending_stat_flair(best_key, "best")
+    worst_flair = _ending_stat_flair(worst_key, "worst")
+    cause = _ending_cause(k, worst_key)
 
-**Сильнейшая опора:** {STAT_LABELS.get(best_key, best_key)}. {_ending_stat_flair(best_key, "best")}
+    if win:
+        return f"""🏰✨ **ПОБЕДА** — корона осталась на голове (по недосмотру судьбы).
 
-**Самая опасная трещина:** {STAT_LABELS.get(worst_key, worst_key)}. {_ending_stat_flair(worst_key, "worst")}
+{cause}
 
-Хроникёр закрывает книгу. Перо дрожит — не от страха, а от привычки.
+**Лучшее, что ты удержал:** **{best}**. {best_flair}
+
+**Худшее, что ты не пустил в горло:** **{worst}**. {worst_flair}
+
+Хроникёр ставит кляксу вместо подписи: так честнее. И всё же… сегодня государство **не рухнуло**.
 """
 
+    # Defeat text: two tones (collapse vs limping)
     if collapse:
-        epilogue = """Государство падает не красиво. Оно падает деловито: печати, подписи — и тишина.
-Трон ещё тёплый, но в зале уже обсуждают, кому он нужнее."""
+        tone = """Печати остались, но смысл вытек. Трон скрипит, как старая лестница: ещё держит вес — уже не держит будущее."""
+        stamp = "💀🔥 **ПОРАЖЕНИЕ** — государство выбрало распасться на заметки в чужих дневниках."
     else:
-        epilogue = """Ты остался стоять, но королевство — с кашлем и нервным тиком.
-Это не конец. Это пауза перед тем, как беда попробует снова — уже с улыбкой."""
+        tone = """Ты дожил до конца недели. Королевство — тоже, но оно кашляет в ладонь и улыбается так, будто просит прощения заранее."""
+        stamp = "🕯️⚠️ **ПОРАЖЕНИЕ** — ты удержал трон, но потерял почву под ним."
 
-    return f"""💀🔥 **ПОРАЖЕНИЕ**
+    return f"""{stamp}
 
-{epilogue}
+{tone}
 
-**Лучшее, что уцелело:** {STAT_LABELS.get(best_key, best_key)}. {_ending_stat_flair(best_key, "best")}
+{cause}
 
-**Худшее, что тянуло ко дну:** {STAT_LABELS.get(worst_key, worst_key)}. {_ending_stat_flair(worst_key, "worst")}
+**Лучшее, что уцелело:** **{best}**. {best_flair}
 
-Ирония судьбы проста: когда королевство скрипит, шутки звучат громче — чтобы не слышать треск.
+**Худшее, что тянуло ко дну:** **{worst}**. {worst_flair}
+
+Ирония проста: когда мир разваливается, шутки становятся последней формой дисциплины.
 """
 
 def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
@@ -1001,11 +990,11 @@ def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
     if decay_change != 0:
         sign = "+" if decay_change > 0 else ""
         if reasons:
-            decay_explain = f"**Почему упадок {'+' if decay_change > 0 else '−'}:** " + "; ".join(reasons) + "."
+            decay_explain = f"**Почему упадок {sign}{decay_change}:** " + "; ".join(reasons) + "."
         else:
-            decay_explain = f"**Почему упадок {'+' if decay_change > 0 else '−'}:** так сложились обстоятельства (и твой указ)."
+            decay_explain = f"**Почему упадок {sign}{decay_change}:** так сложились обстоятельства (и твой указ)."
     else:
-        decay_explain = ""
+        decay_explain = "**Упадок не изменился:** сегодня ты не усилил трещины — и не залечил их до конца."
 
     k.tick_tags()
 
@@ -1018,13 +1007,13 @@ def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
     # store deltas for UI (right panel + choice previews)
     k.last_turn_deltas = dict(deltas)
     k.last_turn_deltas = deltas
-    narrator_parts = [
-        f"**День {before['day']} завершён**\n\n",
-        f"**Сдвиги:** {deltas_line_readable(deltas)}",
-    ]
-    if decay_explain:
-        narrator_parts.append(decay_explain)
-    narrator_text = "\n\n".join(narrator_parts)
+
+    narrator_text = (
+        f"**День {before['day']} завершён**\n\n"
+        f"**Сдвиги:** {deltas_line_readable(deltas)}\n\n"
+        f"**Состояние:** {kingdom_states_line(k)}\n\n"
+        f"{decay_explain}"
+    )
     k.push("narrator", narrator_text)
 
     log_event(k, {
@@ -1134,12 +1123,12 @@ with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown(f"**Упадок:** {k.decay}/10 · {decay_badge(k.decay)}")
     st.progress(k.decay / 10.0)
-    st.markdown(f"- Казна: {zone(k.treasury)} {zone_name(k.treasury)}")
-    st.markdown(f"- Порядок: {zone(k.order)} {zone_name(k.order)}")
-    st.markdown(f"- Здоровье: {zone(k.health)} {zone_name(k.health)}")
-    st.markdown(f"- Знать: {zone(k.nobles)} {zone_name(k.nobles)}")
-    st.markdown(f"- Вера: {zone(k.faith)} {zone_name(k.faith)}")
-    st.markdown(f"- Граница: {zone(k.border)} {zone_name(k.border)}")
+    st.markdown(f"- Казна: {zone(k.treasury)} {zone_name(k.treasury)}{(' ' + _delta_arrows(k.last_turn_deltas.get('treasury',0))) if k.last_turn_deltas.get('treasury',0) else ''}")
+    st.markdown(f"- Порядок: {zone(k.order)} {zone_name(k.order)}{(' ' + _delta_arrows(k.last_turn_deltas.get('order',0))) if k.last_turn_deltas.get('order',0) else ''}")
+    st.markdown(f"- Здоровье: {zone(k.health)} {zone_name(k.health)}{(' ' + _delta_arrows(k.last_turn_deltas.get('health',0))) if k.last_turn_deltas.get('health',0) else ''}")
+    st.markdown(f"- Знать: {zone(k.nobles)} {zone_name(k.nobles)}{(' ' + _delta_arrows(k.last_turn_deltas.get('nobles',0))) if k.last_turn_deltas.get('nobles',0) else ''}")
+    st.markdown(f"- Вера: {zone(k.faith)} {zone_name(k.faith)}{(' ' + _delta_arrows(k.last_turn_deltas.get('faith',0))) if k.last_turn_deltas.get('faith',0) else ''}")
+    st.markdown(f"- Граница: {zone(k.border)} {zone_name(k.border)}{(' ' + _delta_arrows(k.last_turn_deltas.get('border',0))) if k.last_turn_deltas.get('border',0) else ''}")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1187,7 +1176,7 @@ with left:
         choice_idx = st.radio(
             "",
             options=list(range(len(choice_texts))),
-            format_func=lambda i: choice_texts[i],
+            format_func=lambda i: f"{choice_texts[i]}  —  {choice_effect_preview(ev['choices'][i]['effects'])}",
             disabled=disabled,
             label_visibility="collapsed",
             key="choice_radio",
