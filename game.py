@@ -756,6 +756,7 @@ def init_game(seed: int) -> Kingdom:
     k.current_event = None
     k.current_event_id = None
     k.announced_event_id = None
+    k.last_turn_deltas = {}
 
     k.push(
         "narrator",
@@ -961,6 +962,9 @@ def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
     after = snapshot(k)
 
     deltas = diff(before, after)
+
+    # store deltas for UI (right panel + choice previews)
+    k.last_turn_deltas = dict(deltas)
     k.last_turn_deltas = deltas
 
     narrator_text = (
@@ -1078,12 +1082,13 @@ with right:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown(f"**Упадок:** {k.decay}/10 · {decay_badge(k.decay)}")
     st.progress(k.decay / 10.0)
-    st.markdown(f"- Казна: {zone(k.treasury)} {k.treasury}{(' ' + _delta_arrows(k.last_turn_deltas.get('treasury',0))) if k.last_turn_deltas.get('treasury',0) else ''}")
-    st.markdown(f"- Порядок: {zone(k.order)} {k.order}{(' ' + _delta_arrows(k.last_turn_deltas.get('order',0))) if k.last_turn_deltas.get('order',0) else ''}")
-    st.markdown(f"- Здоровье: {zone(k.health)} {k.health}{(' ' + _delta_arrows(k.last_turn_deltas.get('health',0))) if k.last_turn_deltas.get('health',0) else ''}")
-    st.markdown(f"- Знать: {zone(k.nobles)} {k.nobles}{(' ' + _delta_arrows(k.last_turn_deltas.get('nobles',0))) if k.last_turn_deltas.get('nobles',0) else ''}")
-    st.markdown(f"- Вера: {zone(k.faith)} {k.faith}{(' ' + _delta_arrows(k.last_turn_deltas.get('faith',0))) if k.last_turn_deltas.get('faith',0) else ''}")
-    st.markdown(f"- Граница: {zone(k.border)} {k.border}{(' ' + _delta_arrows(k.last_turn_deltas.get('border',0))) if k.last_turn_deltas.get('border',0) else ''}")
+    st.markdown(f"- Казна: {zone(k.treasury)} {zone_name(k.treasury)}{(' ' + _delta_arrows(k.last_turn_deltas.get('treasury',0))) if k.last_turn_deltas.get('treasury',0) else ''}")
+    st.markdown(f"- Порядок: {zone(k.order)} {zone_name(k.order)}{(' ' + _delta_arrows(k.last_turn_deltas.get('order',0))) if k.last_turn_deltas.get('order',0) else ''}")
+    st.markdown(f"- Здоровье: {zone(k.health)} {zone_name(k.health)}{(' ' + _delta_arrows(k.last_turn_deltas.get('health',0))) if k.last_turn_deltas.get('health',0) else ''}")
+    st.markdown(f"- Знать: {zone(k.nobles)} {zone_name(k.nobles)}{(' ' + _delta_arrows(k.last_turn_deltas.get('nobles',0))) if k.last_turn_deltas.get('nobles',0) else ''}")
+    st.markdown(f"- Вера: {zone(k.faith)} {zone_name(k.faith)}{(' ' + _delta_arrows(k.last_turn_deltas.get('faith',0))) if k.last_turn_deltas.get('faith',0) else ''}")
+    st.markdown(f"- Граница: {zone(k.border)} {zone_name(k.border)}{(' ' + _delta_arrows(k.last_turn_deltas.get('border',0))) if k.last_turn_deltas.get('border',0) else ''}")
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 with left:
