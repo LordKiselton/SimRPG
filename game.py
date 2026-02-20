@@ -1,10 +1,10 @@
-# app.py
+# game.py
 # Run:
 #   pip install streamlit pandas
-#   streamlit run app.py
+#   streamlit run game.py
 #
 # Optional:
-#   Create factions.csv near app.py:
+#   Create factions.csv рядом с game.py:
 #     name,power,stability,radicalization,resources
 #     Merchants,60,70,20,75
 #     Temple,55,65,40,55
@@ -157,8 +157,10 @@ FACTION_RU = {
     "Council": "Народный Совет",
 }
 
+
 def fr(name: str) -> str:
     return FACTION_RU.get(name, name)
+
 
 DAY_NAME = {
     1: "День первый — «Слухи на мокрых причалах»",
@@ -170,13 +172,10 @@ DAY_NAME = {
     7: "День седьмой — «Приговор города»",
 }
 
+
 def day_title(d: int) -> str:
     return DAY_NAME.get(d, f"День {d}")
 
-
-# -----------------------------
-# World init / step
-# -----------------------------
 
 PLAYER_ACTIONS_RU = {
     "investigate": {
@@ -203,7 +202,16 @@ PLAYER_ACTIONS_RU = {
         "title": "Подкупить посредников",
         "desc": "Деньги любят тишину. Ты покупаешь доступ, лояльность и закрытые двери.",
     },
+    "noop": {
+        "title": "Промолчать и наблюдать",
+        "desc": "Иногда бездействие — тоже действие. Но город не любит пустоты: её заполняют другие.",
+    },
 }
+
+
+# -----------------------------
+# World init / step
+# -----------------------------
 
 def init_world_from_df(df: pd.DataFrame, seed: int, max_days: int) -> World:
     w = World(seed=seed, max_days=max_days)
@@ -224,8 +232,13 @@ def init_world_from_df(df: pd.DataFrame, seed: int, max_days: int) -> World:
     w.public_fear = 30
     w.magical_tension = 50
 
-    w.push("narrator", f"**{day_title(1)}**\n\nВ гавани Нериссы пропадает корабль с *астральным углём* — топливом для портовых механизмов и городской машинерии. "
-                       f"Цены взлетают, лавки закрываются раньше, а у костров обсуждают одно и то же: **кто виноват и кому выгодно**.")
+    w.push(
+        "narrator",
+        f"**{day_title(1)}**\n\n"
+        "В гавани Нериссы пропадает корабль с *астральным углём* — топливом для портовых механизмов и городской машинерии. "
+        "Цены взлетают, лавки закрываются раньше, а у костров обсуждают одно и то же: **кто виноват и кому выгодно**."
+    )
+
     w.economic_stress += 20
     w.public_fear += 15
     if "Mages" in w.factions:
@@ -236,7 +249,7 @@ def init_world_from_df(df: pd.DataFrame, seed: int, max_days: int) -> World:
 
 
 def compute_effective_power(f: Faction) -> int:
-    # a simple derived "effective power"
+    # derived "effective power" for HUD (not used in logic)
     return int((f.resources * 0.5 + f.power * 0.5) * (0.5 + f.stability / 200.0))
 
 
@@ -255,6 +268,11 @@ def faction_intent(w: World, f: Faction) -> str:
 
 def apply_player_action(w: World, action: str) -> str:
     rng = w.rng()
+
+    if action == "noop":
+        w.public_fear += 1  # город чувствует вакуум
+        return ("Ты выбираешь молчание. В переулках это читают по-разному: "
+                "кто-то видит осторожность, кто-то — слабость. Город продолжает двигаться без тебя.")
 
     if action == "investigate":
         w.public_fear -= 4
@@ -312,7 +330,7 @@ def apply_player_action(w: World, action: str) -> str:
         return (f"Ты платишь тихо и без свидетелей. "
                 f"Люди {fr(target.name)} начинают узнавать тебя по шагам (+8 отношения).")
 
-    return "Ты молчишь и наблюдаешь. Иногда это тоже выбор."
+    return "Ты делаешь шаг — и город отвечает."
 
 
 def apply_faction_action(w: World, actor: Faction, intent: str) -> str:
@@ -371,7 +389,7 @@ def apply_faction_action(w: World, actor: Faction, intent: str) -> str:
 
 
 def system_escalations(w: World) -> List[str]:
-    out = []
+    out: List[str] = []
     rng = w.rng()
 
     mages = w.factions.get("Mages")
@@ -393,7 +411,6 @@ def system_escalations(w: World) -> List[str]:
         if "Temple" in w.factions:
             w.factions["Temple"].power += 3
 
-    # Clue events (cheap mystery beats)
     if w.day in (3, 5) and rng.random() < 0.6:
         clue = {
             "lodge": "У маяка кто-то видел людей в масках: без фонаря, но уверенно, будто дорога им знакома.",
@@ -437,25 +454,22 @@ def check_ending(w: World) -> Optional[str]:
 
 
 def step_world(w: World, player_action: str) -> Optional[str]:
-    # 0) Scene header
+    # Scene header
     w.push("narrator", f"**{day_title(w.day)}**")
 
-    # 1) Player acts
-    player_text = apply_player_action(w, player_action)
-    w.push("player", player_text)
+    # Player acts
+    w.push("player", apply_player_action(w, player_action))
 
-    # 2) Factions act
+    # Factions act
     for f in list(w.factions.values()):
         intent = faction_intent(w, f)
-        faction_text = apply_faction_action(w, f, intent)
-        w.push("world", faction_text)
+        w.push("world", apply_faction_action(w, f, intent))
 
-    # 3) System escalations
-    escalations = system_escalations(w)
-    for e in escalations:
+    # System escalations
+    for e in system_escalations(w):
         w.push("world", e)
 
-    # 4) Natural drift (subtle)
+    # Natural drift
     w.public_fear += 1 if w.economic_stress > 65 else -2
     w.economic_stress += 1 if w.public_fear > 75 else 0
     if "Temple" in w.factions and "Mages" in w.factions:
@@ -463,18 +477,40 @@ def step_world(w: World, player_action: str) -> Optional[str]:
 
     w.clamp()
     ending = check_ending(w)
-
     w.day += 1
     return ending
 
 
 # -----------------------------
-# Streamlit UI
+# Streamlit UI (Variant B)
 # -----------------------------
 
-st.set_page_config(page_title="CRPG-диалог: Нерисса (Vertical Slice)", layout="wide")
+st.set_page_config(page_title="Нерисса: CRPG-диалог + HUD", layout="wide")
+
+st.markdown("""
+<style>
+.block-container { padding-top: 1.0rem; max-width: 1200px; }
+.hud-card {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 12px 12px;
+  margin-bottom: 10px;
+  background: rgba(255,255,255,0.02);
+}
+.hud-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 6px; opacity: 0.95; }
+.hud-small { font-size: 0.85rem; opacity: 0.85; }
+.choice-wrap {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  padding-top: 10px;
+  background: linear-gradient(to top, rgba(14,17,23,0.98), rgba(14,17,23,0.0));
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.title("Нерисса: Пепельная неделя — вертикальный срез")
-st.caption("UI в формате CRPG-диалога. Баланс меняется через таблицу. Механика — ходовая симуляция города.")
+st.caption("Слева — диалог (как в CRPG), справа — HUD города. Баланс редактируется через таблицу (CSV).")
 
 with st.sidebar:
     st.header("Сессия")
@@ -504,31 +540,10 @@ with st.sidebar:
             st.toast("Сброшено", icon="🔄")
 
     st.divider()
-    if st.button("Новая игра / Сброс мира", type="primary"):
-        df = st.session_state.get("factions_df", load_factions_df())
-        st.session_state["world"] = init_world_from_df(df, seed=seed, max_days=max_days)
-        st.session_state["ending"] = None
-        st.toast("Мир перезапущен", icon="🌍")
-
-
-# Init session state
-if "factions_df" not in st.session_state:
-    st.session_state["factions_df"] = load_factions_df()
-
-if "world" not in st.session_state:
-    st.session_state["world"] = init_world_from_df(st.session_state["factions_df"], seed=seed, max_days=max_days)
-
-if "ending" not in st.session_state:
-    st.session_state["ending"] = None
-
-w: World = st.session_state["world"]
-
-# Layout
-left, right = st.columns([1.05, 0.95], gap="large")
-
-with left:
-    st.subheader("Параметры (редактируемая таблица)")
-    st.caption("Правь значения → затем нажми **Новая игра / Сброс мира**, чтобы применить их к симуляции.")
+    st.subheader("Таблица фракций (редактируемая)")
+    st.caption("Правки применятся после **Новая игра / Сброс мира**.")
+    if "factions_df" not in st.session_state:
+        st.session_state["factions_df"] = load_factions_df()
 
     edited = st.data_editor(
         st.session_state["factions_df"],
@@ -550,81 +565,133 @@ with left:
     st.session_state["factions_df"] = edited
 
     st.divider()
-    st.subheader("Состояние города")
-    g1, g2, g3 = st.columns(3)
-    g1.metric("Экономический стресс", w.economic_stress)
-    g2.metric("Общественный страх", w.public_fear)
-    g3.metric("Напряжение магии", w.magical_tension)
+    if st.button("Новая игра / Сброс мира", type="primary"):
+        df = st.session_state.get("factions_df", load_factions_df())
+        st.session_state["world"] = init_world_from_df(df, seed=seed, max_days=max_days)
+        st.session_state["ending"] = None
+        st.toast("Мир перезапущен", icon="🌍")
 
+
+# Init session state world
+if "world" not in st.session_state:
+    df0 = st.session_state.get("factions_df", load_factions_df())
+    st.session_state["world"] = init_world_from_df(df0, seed=seed, max_days=max_days)
+
+if "ending" not in st.session_state:
+    st.session_state["ending"] = None
+
+w: World = st.session_state["world"]
+
+# If user changed seed/max_days but didn't reset, keep current run (by design).
+# Reset world button applies them.
+
+# --- LAYOUT: Variant B ---
+chat_col, hud_col = st.columns([0.70, 0.30], gap="large")
+
+with hud_col:
+    # HUD: City
+    st.markdown('<div class="hud-card">', unsafe_allow_html=True)
+    st.markdown('<div class="hud-title">Панель города</div>', unsafe_allow_html=True)
+    st.metric("Экономический стресс", w.economic_stress)
+    st.metric("Общественный страх", w.public_fear)
+    st.metric("Напряжение магии", w.magical_tension)
+
+    risks = []
+    if w.public_fear >= 80:
+        risks.append("⚠️ Возможен бунт")
+    if w.economic_stress >= 75:
+        risks.append("⚠️ Рынок на грани срыва")
+    if w.magical_tension >= 80:
+        risks.append("⚠️ Риск магической аварии")
+    if not risks:
+        risks.append("✅ Пороговых рисков нет")
+
+    st.markdown("<div class='hud-small'>" + "<br>".join(risks) + "</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # HUD: Factions compact
+    st.markdown('<div class="hud-card">', unsafe_allow_html=True)
+    st.markdown('<div class="hud-title">Фракции</div>', unsafe_allow_html=True)
     rows = []
     for f in w.factions.values():
-        rows.append(
-            {
-                "фракция": fr(f.name),
-                "влияние": f.power,
-                "стабильность": f.stability,
-                "радикализация": f.radicalization,
-                "ресурсы": f.resources,
-                "эфф.сила": compute_effective_power(f),
-                "отношение_к_тебе": f.rel_player,
-            }
-        )
+        rows.append({
+            "фракция": fr(f.name),
+            "влияние": f.power,
+            "стаб": f.stability,
+            "рад": f.radicalization,
+            "рес": f.resources,
+        })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    with st.expander("Справка: как читать параметры"):
-        st.markdown(
-            "- **Экономический стресс**: дефицит, рост цен, давление на торговлю.\n"
-            "- **Общественный страх**: вероятность бунтов, саботажа, радикальных мер.\n"
-            "- **Напряжение магии**: риск аварий и охоты на ведьм.\n"
-            "- **Влияние фракции**: вес в политике и улицах.\n"
-            "- **Стабильность**: внутренняя дисциплина/устойчивость.\n"
-            "- **Радикализация**: склонность к крайним мерам.\n"
-        )
+    # HUD: Debug mini (optional)
+    with st.expander("Подробности (отладка)"):
+        rows2 = []
+        for f in w.factions.values():
+            rows2.append({
+                "фракция": fr(f.name),
+                "эфф_сила": compute_effective_power(f),
+                "отношение_к_тебе": f.rel_player,
+            })
+        st.dataframe(pd.DataFrame(rows2), use_container_width=True, hide_index=True)
+        st.caption("Эфф_сила — вспомогательная метрика для HUD, на логику не влияет.")
 
-with right:
+with chat_col:
     st.subheader(f"Сцена: день {w.day}/{w.max_days}")
-    st.caption("Выбирай действие — и смотри, как город отвечает. Это вертикальный срез: коротко, но системно.")
 
     if st.session_state["ending"]:
         st.error("ФИНАЛ")
         st.markdown(st.session_state["ending"])
         st.info("Нажми **Новая игра / Сброс мира** в сайдбаре, чтобы сыграть ещё раз.")
 
-    # Actions (as CRPG dialogue choices)
+    # Chat log
+    st.markdown("### Диалог")
+    if not w.log:
+        st.info("Пока пусто. Выбери действие снизу.")
+    else:
+        msgs = w.log[-100:]  # last 100 messages
+        for m in msgs:
+            with st.chat_message(ROLE_TO_CHAT[m.role]):
+                st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
+
+    # Choice panel
+    st.markdown('<div class="choice-wrap">', unsafe_allow_html=True)
     st.markdown("### Выбор реплики / действия")
+
     disabled = bool(st.session_state["ending"]) or (w.day > w.max_days)
 
-    # Make choices as radio for CRPG-feel
-    options = list(PLAYER_ACTIONS_RU.keys())
-    labels = [f"**{PLAYER_ACTIONS_RU[k]['title']}** — {PLAYER_ACTIONS_RU[k]['desc']}" for k in options]
-    choice = st.radio("",
-                      options=options,
-                      format_func=lambda k: f"{PLAYER_ACTIONS_RU[k]['title']}",
-                      disabled=disabled,
-                      label_visibility="collapsed")
-
+    options = ["investigate", "support_temple", "support_mages", "support_merchants", "spread_rumour", "bribe", "noop"]
+    choice = st.radio(
+        "",
+        options=options,
+        format_func=lambda k: PLAYER_ACTIONS_RU[k]["title"],
+        disabled=disabled,
+        label_visibility="collapsed",
+        key="choice_radio",
+    )
     st.caption(PLAYER_ACTIONS_RU[choice]["desc"])
 
-    col_go, col_skip = st.columns([1, 1])
-    with col_go:
+    c1, c2 = st.columns([1, 1])
+    with c1:
         if st.button("Сказать/Сделать это", type="primary", use_container_width=True, disabled=disabled):
             ending = step_world(w, choice)
             if ending:
                 st.session_state["ending"] = ending
-            # Advance day header if within limits
+
+            # If episode ends by days, compute outcome
             if w.day > w.max_days and not st.session_state["ending"]:
-                # determine outcome by final state if no explicit ending
                 st.session_state["ending"] = check_ending(w) or (
                     "**Патовая неделя.**\n\nНикто не получил решающего преимущества. "
                     "Город выжил — и это уже событие. Но узлы затянуты, а не развязаны."
                 )
             st.rerun()
 
-    with col_skip:
-        if st.button("Пропустить ход (ничего не делать)", use_container_width=True, disabled=disabled):
-            ending = step_world(w, "noop")  # noop handled as "do nothing"
+    with c2:
+        if st.button("Пропустить ход", use_container_width=True, disabled=disabled):
+            ending = step_world(w, "noop")
             if ending:
                 st.session_state["ending"] = ending
+
             if w.day > w.max_days and not st.session_state["ending"]:
                 st.session_state["ending"] = check_ending(w) or (
                     "**Патовая неделя.**\n\nНикто не получил решающего преимущества. "
@@ -632,29 +699,8 @@ with right:
                 )
             st.rerun()
 
-    st.divider()
-    st.markdown("### Диалог (как в CRPG)")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    # Render chat log
-    if not w.log:
-        st.info("Пока пусто. Начни с выбора действия.")
-    else:
-        # show last N messages for readability
-        last_n = st.slider("Сколько последних сообщений показывать", 10, 200, 60, 10, disabled=False)
-        msgs = w.log[-last_n:]
-
-        for m in msgs:
-            chat_role = ROLE_TO_CHAT[m.role]
-            with st.chat_message(chat_role):
-                st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
-
-    with st.expander("Показать весь журнал"):
+    with st.expander("Весь журнал диалога"):
         for m in w.log:
-            st.markdown(f"{m.role.upper()}: {m.content}")
-
-
-# Patch: handle noop cleanly without changing existing engine too much
-# If user pressed "skip", step_world called with "noop". We translate it here:
-# (Streamlit reruns script; we cannot easily intercept inside step_world without changing above.)
-# So we add a tiny safety: if last player message is missing for noop, we won't break anything.
-# (noop is treated by apply_player_action fallback.)
+            st.markdown(f"**{m.role.upper()}**: {m.content}")
