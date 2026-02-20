@@ -73,7 +73,6 @@ class World:
     day: int = 1
     max_days: int = 7
 
-    # global pressures (0..100)
     economic_stress: int = 40
     public_fear: int = 30
     magical_tension: int = 50
@@ -81,7 +80,6 @@ class World:
     factions: Dict[str, Faction] = field(default_factory=dict)
     log: List[Message] = field(default_factory=list)
 
-    # hidden truth of crisis
     crisis_truth: str = "unknown"  # lodge/mages/merchants/accident
 
     def rng(self) -> random.Random:
@@ -227,7 +225,6 @@ def init_world_from_df(df: pd.DataFrame, seed: int, max_days: int) -> World:
     w.log = []
     w.day = 1
 
-    # Day 1 trigger
     w.economic_stress = 40
     w.public_fear = 30
     w.magical_tension = 50
@@ -249,12 +246,10 @@ def init_world_from_df(df: pd.DataFrame, seed: int, max_days: int) -> World:
 
 
 def compute_effective_power(f: Faction) -> int:
-    # derived "effective power" for HUD (not used in logic)
     return int((f.resources * 0.5 + f.power * 0.5) * (0.5 + f.stability / 200.0))
 
 
 def faction_intent(w: World, f: Faction) -> str:
-    # Simple heuristics (cheap + readable)
     if w.economic_stress > 70 and f.name == "Merchants":
         return "law"
     if w.magical_tension > 70 and f.name == "Temple":
@@ -270,7 +265,7 @@ def apply_player_action(w: World, action: str) -> str:
     rng = w.rng()
 
     if action == "noop":
-        w.public_fear += 1  # город чувствует вакуум
+        w.public_fear += 1
         return ("Ты выбираешь молчание. В переулках это читают по-разному: "
                 "кто-то видит осторожность, кто-то — слабость. Город продолжает двигаться без тебя.")
 
@@ -454,22 +449,16 @@ def check_ending(w: World) -> Optional[str]:
 
 
 def step_world(w: World, player_action: str) -> Optional[str]:
-    # Scene header
     w.push("narrator", f"**{day_title(w.day)}**")
-
-    # Player acts
     w.push("player", apply_player_action(w, player_action))
 
-    # Factions act
     for f in list(w.factions.values()):
         intent = faction_intent(w, f)
         w.push("world", apply_faction_action(w, f, intent))
 
-    # System escalations
     for e in system_escalations(w):
         w.push("world", e)
 
-    # Natural drift
     w.public_fear += 1 if w.economic_stress > 65 else -2
     w.economic_stress += 1 if w.public_fear > 75 else 0
     if "Temple" in w.factions and "Mages" in w.factions:
@@ -482,7 +471,7 @@ def step_world(w: World, player_action: str) -> Optional[str]:
 
 
 # -----------------------------
-# Streamlit UI (Variant B)
+# Streamlit UI (Variant B + separate log window)
 # -----------------------------
 
 st.set_page_config(page_title="Нерисса: CRPG-диалог + HUD", layout="wide")
@@ -510,7 +499,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("Нерисса: Пепельная неделя — вертикальный срез")
-st.caption("Слева — диалог (как в CRPG), справа — HUD города. Баланс редактируется через таблицу (CSV).")
+st.caption("Слева — диалог (как в CRPG), справа — HUD города. Журнал вынесен отдельно, чтобы главный экран оставался чистым.")
 
 with st.sidebar:
     st.header("Сессия")
@@ -542,6 +531,7 @@ with st.sidebar:
     st.divider()
     st.subheader("Таблица фракций (редактируемая)")
     st.caption("Правки применятся после **Новая игра / Сброс мира**.")
+
     if "factions_df" not in st.session_state:
         st.session_state["factions_df"] = load_factions_df()
 
@@ -572,7 +562,6 @@ with st.sidebar:
         st.toast("Мир перезапущен", icon="🌍")
 
 
-# Init session state world
 if "world" not in st.session_state:
     df0 = st.session_state.get("factions_df", load_factions_df())
     st.session_state["world"] = init_world_from_df(df0, seed=seed, max_days=max_days)
@@ -582,14 +571,11 @@ if "ending" not in st.session_state:
 
 w: World = st.session_state["world"]
 
-# If user changed seed/max_days but didn't reset, keep current run (by design).
-# Reset world button applies them.
 
 # --- LAYOUT: Variant B ---
 chat_col, hud_col = st.columns([0.70, 0.30], gap="large")
 
 with hud_col:
-    # HUD: City
     st.markdown('<div class="hud-card">', unsafe_allow_html=True)
     st.markdown('<div class="hud-title">Панель города</div>', unsafe_allow_html=True)
     st.metric("Экономический стресс", w.economic_stress)
@@ -609,7 +595,6 @@ with hud_col:
     st.markdown("<div class='hud-small'>" + "<br>".join(risks) + "</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # HUD: Factions compact
     st.markdown('<div class="hud-card">', unsafe_allow_html=True)
     st.markdown('<div class="hud-title">Фракции</div>', unsafe_allow_html=True)
     rows = []
@@ -624,7 +609,6 @@ with hud_col:
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # HUD: Debug mini (optional)
     with st.expander("Подробности (отладка)"):
         rows2 = []
         for f in w.factions.values():
@@ -634,7 +618,6 @@ with hud_col:
                 "отношение_к_тебе": f.rel_player,
             })
         st.dataframe(pd.DataFrame(rows2), use_container_width=True, hide_index=True)
-        st.caption("Эфф_сила — вспомогательная метрика для HUD, на логику не влияет.")
 
 with chat_col:
     st.subheader(f"Сцена: день {w.day}/{w.max_days}")
@@ -644,65 +627,59 @@ with chat_col:
         st.markdown(st.session_state["ending"])
         st.info("Нажми **Новая игра / Сброс мира** в сайдбаре, чтобы сыграть ещё раз.")
 
-    # Chat log
-st.markdown("### Диалог")
+    # -----------------------------
+    # Main dialogue view + Separate log window
+    # -----------------------------
+    st.markdown("### Диалог")
 
-# Сколько сообщений держим на главном экране
-main_keep = st.slider(
-    "Сколько сообщений показывать на главном экране",
-    min_value=10,
-    max_value=120,
-    value=40,
-    step=10,
-    help="Это только витрина сцены. Полный журнал доступен отдельно.",
-    key="main_keep_slider"
-)
+    # Keep main screen clean: show last N messages only
+    main_keep = st.slider(
+        "Сколько сообщений держать на главном экране",
+        min_value=10,
+        max_value=120,
+        value=40,
+        step=10,
+        help="Это «витрина» текущей сцены. Полная история — в журнале ниже.",
+        key="main_keep_slider",
+    )
 
-if not w.log:
-    st.info("Пока пусто. Выбери действие снизу.")
-else:
-    msgs = w.log[-main_keep:]
-    for m in msgs:
-        with st.chat_message(ROLE_TO_CHAT[m.role]):
-            st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
+    if not w.log:
+        st.info("Пока пусто. Выбери действие снизу.")
+    else:
+        for m in w.log[-main_keep:]:
+            with st.chat_message(ROLE_TO_CHAT[m.role]):
+                st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
 
-# --- Отдельное окно журнала ---
-# Вариант 1 (предпочтительно): popover (если доступен)
-try:
-    with st.popover("📜 Журнал событий / лог"):
-        st.caption("Здесь можно смотреть всю историю и управлять объёмом вывода.")
+    # Separate "window" for full log (popover if available, else expander)
+    def render_log_window():
+        st.caption("Полный журнал: удобно листать, не перегружая сцену.")
         log_keep = st.slider(
             "Сколько последних сообщений показать в журнале",
             min_value=50,
             max_value=max(50, len(w.log)),
             value=min(300, len(w.log)) if len(w.log) > 0 else 50,
             step=50,
-            key="log_keep_slider"
-        )
-
-        # Прокручиваемое окно
-        log_container = st.container(height=420)
-        with log_container:
-            for m in w.log[-log_keep:]:
-                st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
-except Exception:
-    # Вариант 2: expander (если popover недоступен)
-    with st.expander("📜 Журнал событий / лог"):
-        st.caption("Здесь можно смотреть всю историю и управлять объёмом вывода.")
-        log_keep = st.slider(
-            "Сколько последних сообщений показать в журнале",
-            min_value=50,
-            max_value=max(50, len(w.log)),
-            value=min(300, len(w.log)) if len(w.log) > 0 else 50,
-            step=50,
-            key="log_keep_slider"
+            key="log_keep_slider",
         )
         log_container = st.container(height=420)
         with log_container:
-            for m in w.log[-log_keep:]:
-                st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
+            if not w.log:
+                st.write("Журнал пуст.")
+            else:
+                for m in w.log[-log_keep:]:
+                    st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
+                    st.divider()
 
-    # Choice panel
+    try:
+        with st.popover("📜 Журнал событий"):
+            render_log_window()
+    except Exception:
+        with st.expander("📜 Журнал событий"):
+            render_log_window()
+
+    # -----------------------------
+    # Choice panel (kept intact)
+    # -----------------------------
     st.markdown('<div class="choice-wrap">', unsafe_allow_html=True)
     st.markdown("### Выбор реплики / действия")
 
@@ -726,7 +703,6 @@ except Exception:
             if ending:
                 st.session_state["ending"] = ending
 
-            # If episode ends by days, compute outcome
             if w.day > w.max_days and not st.session_state["ending"]:
                 st.session_state["ending"] = check_ending(w) or (
                     "**Патовая неделя.**\n\nНикто не получил решающего преимущества. "
@@ -748,8 +724,3 @@ except Exception:
             st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
-
-    with st.expander("Весь журнал диалога"):
-        for m in w.log:
-            st.markdown(f"**{m.role.upper()}**: {m.content}")
-
