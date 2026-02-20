@@ -137,6 +137,15 @@ def zone(v: int) -> str:
         return "🟡"
     return "🔴"
 
+
+def zone_name(v: int) -> str:
+    """Word-only state label for readability (no numbers)."""
+    if v >= GREEN:
+        return "Стабильно"
+    if v >= YELLOW:
+        return "Шатко"
+    return "Кризис"
+
 def red_count(k: Kingdom) -> int:
     return sum(1 for v in (k.treasury, k.order, k.health, k.nobles, k.faith, k.border) if v < YELLOW)
 
