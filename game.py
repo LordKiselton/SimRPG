@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional, Literal, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -261,6 +261,30 @@ def faction_intent(w: World, f: Faction) -> str:
     return "propaganda"
 
 
+def intent_title_ru(intent: str) -> str:
+    return {
+        "law": "давит решениями",
+        "propaganda": "раскачивает мнение",
+        "aid": "чинит внутренний порядок",
+        "sabotage": "бьёт исподтишка",
+    }.get(intent, "выжидает")
+
+
+def intent_reason_ru(w: World, f: Faction, intent: str) -> str:
+    # короткая причина “почему так”
+    if intent == "law" and f.name == "Merchants":
+        return f"экономический стресс высокий ({w.economic_stress})"
+    if intent == "propaganda" and f.name == "Temple" and w.magical_tension > 70:
+        return f"напряжение магии высокое ({w.magical_tension})"
+    if intent == "aid" and f.name == "Mages":
+        return f"стабильность низкая ({f.stability})"
+    if intent == "sabotage":
+        return f"страх на улицах высокий ({w.public_fear})"
+    if intent == "propaganda":
+        return "борьба за влияние (обычный ход)"
+    return "нет явного триггера"
+
+
 def apply_player_action(w: World, action: str) -> str:
     rng = w.rng()
 
@@ -459,6 +483,7 @@ def step_world(w: World, player_action: str) -> Optional[str]:
     for e in system_escalations(w):
         w.push("world", e)
 
+    # Natural drift
     w.public_fear += 1 if w.economic_stress > 65 else -2
     w.economic_stress += 1 if w.public_fear > 75 else 0
     if "Temple" in w.factions and "Mages" in w.factions:
@@ -471,7 +496,141 @@ def step_world(w: World, player_action: str) -> Optional[str]:
 
 
 # -----------------------------
-# Streamlit UI (Chat feed)
+# Explainability helpers (Δ report + preview)
+# -----------------------------
+
+def snapshot_world(w: World) -> dict:
+    return {
+        "economic_stress": w.economic_stress,
+        "public_fear": w.public_fear,
+        "magical_tension": w.magical_tension,
+        "factions": {
+            name: {
+                "power": f.power,
+                "stability": f.stability,
+                "radicalization": f.radicalization,
+                "resources": f.resources,
+                "rel_player": f.rel_player,
+            }
+            for name, f in w.factions.items()
+        }
+    }
+
+
+def fmt_delta(x: int) -> str:
+    if x > 0:
+        return f"+{x}"
+    return str(x)
+
+
+def make_delta_report(before: dict, after: dict, player_action: str) -> str:
+    ge = after["economic_stress"] - before["economic_stress"]
+    gf = after["public_fear"] - before["public_fear"]
+    gm = after["magical_tension"] - before["magical_tension"]
+
+    # Top faction changes by absolute sum on key stats (power/stability/rad/resources)
+    changes = []
+    for name, b in before["factions"].items():
+        a = after["factions"].get(name)
+        if not a:
+            continue
+        score = (
+            abs(a["power"] - b["power"]) +
+            abs(a["stability"] - b["stability"]) +
+            abs(a["radicalization"] - b["radicalization"]) +
+            abs(a["resources"] - b["resources"]) +
+            abs(a["rel_player"] - b["rel_player"])
+        )
+        if score > 0:
+            changes.append((score, name, b, a))
+    changes.sort(reverse=True, key=lambda t: t[0])
+    top = changes[:2]
+
+    lines = []
+    lines.append("**Итог хода (что реально поменялось):**")
+    lines.append(
+        f"- Город: Экономика **{fmt_delta(ge)}**, Страх **{fmt_delta(gf)}**, Магия **{fmt_delta(gm)}**"
+    )
+
+    if top:
+        lines.append("- Фракции (самые заметные сдвиги):")
+        for _, name, b, a in top:
+            parts = []
+            for k, ru in [("power", "влияние"), ("stability", "стаб"), ("radicalization", "рад"), ("resources", "рес"), ("rel_player", "отношение")]:
+                d = a[k] - b[k]
+                if d != 0:
+                    parts.append(f"{ru} {fmt_delta(d)}")
+            lines.append(f"  - {fr(name)}: " + (", ".join(parts) if parts else "без явных сдвигов"))
+
+    # Short “why” hint (non-exhaustive but helpful)
+    why = {
+        "investigate": "Расследование обычно снижает истерию, а иногда бьёт по реальному виновнику (если ты попал в след).",
+        "support_temple": "Публичная поддержка Храма укрепляет порядок, но почти всегда поднимает градус конфликта вокруг магии.",
+        "support_mages": "Защита магов снижает риск линчевания, но может радикализировать их противников.",
+        "support_merchants": "Решение поставок разгружает экономику и усиливает Торговую гильдию (часто за счёт Совета).",
+        "spread_rumour": "Слухи ослабляют цель, но подпитывают общий страх.",
+        "bribe": "Подкуп улучшает отношение выбранной силы к тебе, но съедает её ресурсы (и оставляет след в городе).",
+        "noop": "Бездействие оставляет инициативу другим: город сам себя накручивает.",
+    }.get(player_action, "Город отреагировал на твоё действие и собственные внутренние триггеры.")
+    lines.append(f"- Почему так: _{why}_")
+
+    return "\n".join(lines)
+
+
+def preview_effect_ru(action: str) -> Tuple[str, str]:
+    """
+    Returns (short bullets, disclaimer)
+    """
+    # Arrows are approximate, not guaranteed.
+    if action == "investigate":
+        return (
+            "- Ожидаемо: **Страх ↓**, иногда **Экономика ↓**\n"
+            "- Возможный эффект: удар по одной из фракций (если нашёл след)\n"
+            "- Риск: если улика указывает на магов — **Магия ↑**",
+            "Превью приблизительное: итог зависит от скрытой причины кризиса и текущих порогов."
+        )
+    if action == "support_temple":
+        return (
+            "- Ожидаемо: **Храм ↑**, **Магия ↑**\n"
+            "- Побочный эффект: **стабильность магов ↓**",
+            "Превью приблизительное: если страх высок, эффект может усилиться через реакции фракций."
+        )
+    if action == "support_mages":
+        return (
+            "- Ожидаемо: **стабильность магов ↑**, **Магия ↓**\n"
+            "- Побочный эффект: **радикализация Храма ↑**",
+            "Превью приблизительное: при высоком страхе возможны неприятные эскалации независимо от выбора."
+        )
+    if action == "support_merchants":
+        return (
+            "- Ожидаемо: **Экономика ↓**, **ресурсы Торговцев ↑**\n"
+            "- Побочный эффект: **влияние Совета ↓**",
+            "Превью приблизительное: если рынок уже горит, эффект будет ощущаться сильнее."
+        )
+    if action == "spread_rumour":
+        return (
+            "- Ожидаемо: **влияние цели ↓**, **Страх ↑**\n"
+            "- Хорошо для: раскачки политического баланса\n"
+            "- Плохо для: стабильности города",
+            "Превью приблизительное: цель выбирается контекстно (в текущей версии — случайно)."
+        )
+    if action == "bribe":
+        return (
+            "- Ожидаемо: **отношение выбранной силы к тебе ↑**\n"
+            "- Цена: **её ресурсы ↓**",
+            "Превью приблизительное: цель выбирается контекстно (в текущей версии — случайно)."
+        )
+    if action == "noop":
+        return (
+            "- Ожидаемо: **Страх слегка ↑**\n"
+            "- Остальное: город и фракции “сыграют без тебя”",
+            "Превью приблизительное: если параметры близко к порогам, события могут резко эскалировать."
+        )
+    return ("- Ожидаемо: эффект зависит от контекста", "Превью приблизительное.")
+
+
+# -----------------------------
+# Streamlit UI (Chat feed + explainability)
 # -----------------------------
 
 st.set_page_config(page_title="Нерисса: CRPG-диалог + HUD", layout="wide")
@@ -488,19 +647,24 @@ st.markdown("""
 }
 .hud-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 6px; opacity: 0.95; }
 .hud-small { font-size: 0.85rem; opacity: 0.85; }
-
-/* Chat feed box */
 .chat-feed {
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 14px;
   padding: 6px;
   background: rgba(255,255,255,0.01);
 }
+.preview-card {
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 14px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  background: rgba(255,255,255,0.02);
+}
 </style>
 """, unsafe_allow_html=True)
 
 st.title("Нерисса: Пепельная неделя — вертикальный срез")
-st.caption("Диалог живёт в отдельной ленте с внутренней прокруткой. Новые сообщения всегда рядом, без скролла страницы.")
+st.caption("Добавлено: превью эффектов выбора, намерения фракций (с причинами), отчёт по дельтам после хода.")
 
 with st.sidebar:
     st.header("Сессия")
@@ -595,6 +759,16 @@ with hud_col:
     st.markdown("<div class='hud-small'>" + "<br>".join(risks) + "</div>", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Intentions (explainable AI for factions)
+    st.markdown('<div class="hud-card">', unsafe_allow_html=True)
+    st.markdown('<div class="hud-title">Намерения фракций (почему они так ходят)</div>', unsafe_allow_html=True)
+    for f in w.factions.values():
+        intent = faction_intent(w, f)
+        st.markdown(
+            f"- **{fr(f.name)}**: _{intent_title_ru(intent)}_ — {intent_reason_ru(w, f, intent)}"
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown('<div class="hud-card">', unsafe_allow_html=True)
     st.markdown('<div class="hud-title">Фракции</div>', unsafe_allow_html=True)
     rows = []
@@ -632,7 +806,7 @@ with chat_col:
     with cA:
         chat_height = st.slider("Высота ленты", 350, 900, 650, 50, key="chat_height")
     with cB:
-        render_last = st.slider("Сообщений в ленте", 30, 400, 140, 10, key="render_last")
+        render_last = st.slider("Сообщений в ленте", 30, 400, 160, 10, key="render_last")
     with cC:
         if st.button("⬇️ Вниз к последнему", use_container_width=True):
             st.rerun()
@@ -648,10 +822,9 @@ with chat_col:
             for m in msgs:
                 with st.chat_message(ROLE_TO_CHAT[m.role]):
                     st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}")
-            st.markdown("<div id='chat-bottom'></div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Choice panel
+    # Choice panel + preview
     st.markdown("### Выбор реплики / действия")
     disabled = bool(st.session_state["ending"]) or (w.day > w.max_days)
 
@@ -664,31 +837,39 @@ with chat_col:
         label_visibility="collapsed",
         key="choice_radio",
     )
+
     st.caption(PLAYER_ACTIONS_RU[choice]["desc"])
+    bullets, disclaimer = preview_effect_ru(choice)
+    st.markdown('<div class="preview-card">', unsafe_allow_html=True)
+    st.markdown("**Превью эффекта (чтобы понимать выбор):**\n\n" + bullets)
+    st.markdown(f"<span style='opacity:0.8; font-size: 0.85rem;'>{disclaimer}</span>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     b1, b2 = st.columns([1, 1])
+
+    def apply_turn(player_action: str):
+        before = snapshot_world(w)
+        ending = step_world(w, player_action)
+        after = snapshot_world(w)
+
+        # Push explicit Δ report into the log (so player learns causality)
+        w.push("system", make_delta_report(before, after, player_action))
+
+        if ending:
+            st.session_state["ending"] = ending
+
+        if w.day > w.max_days and not st.session_state["ending"]:
+            st.session_state["ending"] = check_ending(w) or (
+                "**Патовая неделя.**\n\nНикто не получил решающего преимущества. "
+                "Город выжил — и это уже событие. Но узлы затянуты, а не развязаны."
+            )
+
     with b1:
         if st.button("Сказать/Сделать это", type="primary", use_container_width=True, disabled=disabled):
-            ending = step_world(w, choice)
-            if ending:
-                st.session_state["ending"] = ending
-
-            if w.day > w.max_days and not st.session_state["ending"]:
-                st.session_state["ending"] = check_ending(w) or (
-                    "**Патовая неделя.**\n\nНикто не получил решающего преимущества. "
-                    "Город выжил — и это уже событие. Но узлы затянуты, а не развязаны."
-                )
+            apply_turn(choice)
             st.rerun()
 
     with b2:
         if st.button("Пропустить ход", use_container_width=True, disabled=disabled):
-            ending = step_world(w, "noop")
-            if ending:
-                st.session_state["ending"] = ending
-
-            if w.day > w.max_days and not st.session_state["ending"]:
-                st.session_state["ending"] = check_ending(w) or (
-                    "**Патовая неделя.**\n\nНикто не получил решающего преимущества. "
-                    "Город выжил — и это уже событие. Но узлы затянуты, а не развязаны."
-                )
+            apply_turn("noop")
             st.rerun()
