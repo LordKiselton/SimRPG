@@ -1,17 +1,17 @@
-# majesty_game_ui_v2_fixed.py
+# majesty_game_ui_v3_clean.py
 # Streamlit Majesty-like procedural kingdom crisis prototype (7 days).
 #
-# This is your provided majesty_game_ui_v2.py with UI changes applied AND fixed
-# (indentation + broken multiline f-strings in the UI section).
+# Changes included (clean + no “preview мусор”):
+# - FIX: NPC avatars are stable per message (no “current event” avatar bleed).
+# - Numbers removed from: endings, decay reasons/explanations, most UI copy (except day counters / progress bar / seed / internal sliders).
+# - Ending is a SINGLE scene (no double ending / no enhanced_ending spam).
+# - Decay reasoning is atmospheric (no +1/-1/+severity text).
+# - Drift beats are narrated (Chronicle voice), not “NPC”.
+# - Active tags display is qualitative (no “X days”).
+# - Layout kept robust (no broken multiline f-strings, no links).
 #
-# Key UI behavior kept as requested:
-# - Title: "Королевство за Семь Дней" + updated subtitle
-# - Stats panel on the right of chat
-# - Active tags moved to the very bottom
-# - NPC messages use 📣 avatar; narrator 🕯️; player 👑
-# - News are shown directly in the chat (announced once per day)
-# - Game result is written into chat (via play_choice pushing ending)
-# - "Двор:" removed -> "День N/X"
+# Notes:
+# - I intentionally did NOT add choice effect previews (as requested).
 
 from __future__ import annotations
 
@@ -49,6 +49,7 @@ ROLE_PREFIX = {
 class Message:
     role: Role
     content: str
+    avatar: str = ""  # stable avatar per message
 
 
 @dataclass
@@ -81,7 +82,7 @@ class Kingdom:
     # track which event has been announced into chat (to avoid duplicates)
     announced_event_id: Optional[str] = None
 
-    # last turn deltas for UI hints
+    # last turn deltas for UI hints (kept for future; not shown as preview)
     last_turn_deltas: Dict[str, int] = field(default_factory=dict)
 
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
@@ -95,8 +96,14 @@ class Kingdom:
             setattr(self, k, int(max(0, min(100, v))))
         self.decay = int(max(0, min(10, self.decay)))
 
-    def push(self, role: Role, text: str):
-        self.log.append(Message(role=role, content=text))
+    def push(self, role: Role, text: str, avatar: Optional[str] = None):
+        if avatar is None:
+            avatar = "🕯️" if role == "narrator" else ("👑" if role == "player" else "📣")
+        self.log.append(Message(role=role, content=text, avatar=avatar))
+
+    def push_npc(self, npc_id: str, text: str):
+        emoji = NPCS.get(npc_id, {}).get("emoji", "📣")
+        self.push("npc", text, avatar=emoji)
 
     def add_tag(self, name: str, days: int):
         for t in self.tags:
@@ -137,7 +144,6 @@ def zone(v: int) -> str:
         return "🟡"
     return "🔴"
 
-
 def zone_name(v: int) -> str:
     """Word-only state label for readability (no numbers)."""
     if v >= GREEN:
@@ -163,34 +169,27 @@ def stability_score(k: Kingdom) -> int:
     score = base - penalty - k.decay * 5
     return int(max(0, min(100, score)))
 
-def worst_stat(k: Kingdom) -> Tuple[str, int]:
-    items = [
-        ("Казна", k.treasury),
-        ("Порядок", k.order),
-        ("Здоровье", k.health),
-        ("Знать", k.nobles),
-        ("Вера", k.faith),
-        ("Граница", k.border),
-    ]
-    items.sort(key=lambda x: x[1])
-    return items[0]
-
-
-def render_decay_bar(decay: int) -> str:
-    skulls = []
-    for i in range(10):
-        if i < decay:
-            skulls.append("<span style='color:#ff4d4d;font-size:20px'>💀</span>")
-        else:
-            skulls.append("<span style='color:#555;font-size:20px'>💀</span>")
-    return " ".join(skulls)
-
 def decay_badge(decay: int) -> str:
     if decay <= 2:
         return "🟢 Низкий"
     if decay <= 5:
         return "🟡 Риск"
     return "🔴 Критический"
+
+def decay_phrase(delta: int) -> str:
+    if delta > 0:
+        return "подрос"
+    if delta < 0:
+        return "отступил"
+    return "не шевельнулся"
+
+def tag_age_phrase(days_left: int) -> str:
+    # qualitative, no digits
+    if days_left >= 3:
+        return "ещё держится"
+    if days_left == 2:
+        return "ещё тянется"
+    return "на исходе"
 
 
 # -----------------------------
@@ -396,7 +395,7 @@ EVENTS: List[dict] = [
         "npc": "physician",
         "domain": "health",
         "severity": 2,
-        "title": "Колodец, который ‘сам испортился’",
+        "title": "Колодец, который ‘сам испортился’",
         "intro": """Лекарь приносит кружку воды и демонстративно не пьёт.
 
 «В восточном квартале люди падают без лишней драматургии. Колодец ‘сам испортился’ — как репутация при дворе.
@@ -658,15 +657,20 @@ def event_resolution_decay_delta(k: Kingdom, before: dict, after: dict, ev: dict
         b = int(before[domain])
         a = int(after[domain])
 
+        # If day's crisis domain ends in red -> decay grows by severity
         if a < YELLOW:
             delta += severity
-            reasons.append(f"кризис дня не купирован ({STAT_LABELS.get(domain, domain)} в 🔴) +{severity}")
+            reasons.append("рана дня осталась открытой")
+
+        # If we climbed out of red -> small relief
         if b < YELLOW and a >= YELLOW:
             delta -= 1
-            reasons.append(f"кризис дня приглушён ({STAT_LABELS.get(domain, domain)} вышла из 🔴) -1")
+            reasons.append("кризис дня удалось приглушить")
+
+        # If we fell into red from non-red -> extra damage
         if b >= YELLOW and a < YELLOW:
             delta += 1
-            reasons.append(f"ты открыл новую рану ({STAT_LABELS.get(domain, domain)} упала в 🔴) +1")
+            reasons.append("в указе нашлась новая трещина")
 
     return delta, reasons
 
@@ -677,18 +681,20 @@ def global_state_decay_delta(k: Kingdom) -> Tuple[int, List[str]]:
     delta = 0
     if reds >= 2:
         delta += 1
-        reasons.append("в государстве 2+ 🔴 зон +1")
+        reasons.append("государство трещит по швам")
     if greens == 6:
         delta -= 1
-        reasons.append("все показатели в 🟢 зоне -1")
+        reasons.append("королевство дышит ровно")
     return delta, reasons
 
 def system_end_of_day(k: Kingdom, rng: random.Random) -> List[str]:
     beats: List[str] = []
 
+    # baseline drift (kept, but narrated clearly as “ночь”)
     k.treasury -= 2
     k.border -= 1
 
+    # tag-driven drift
     if k.has_tag("tax_hike"):
         k.order -= 1
     if k.has_tag("quarantine"):
@@ -700,6 +706,7 @@ def system_end_of_day(k: Kingdom, rng: random.Random) -> List[str]:
         k.nobles -= 1
         k.faith -= 1
 
+    # cascade if weak zones
     if k.order < YELLOW:
         k.treasury -= 1
         k.health -= 1
@@ -710,8 +717,9 @@ def system_end_of_day(k: Kingdom, rng: random.Random) -> List[str]:
     if k.border < YELLOW:
         k.order -= 1
 
+    # rare night incidents (kept)
     if k.order < 30 and rng.random() < 0.30:
-        beats.append("К ночи слышны крики: в одном из кварталов ‘самоорганизовались’. Порядок — договор, а не предмет.")
+        beats.append("Ночью слышны крики: в одном из кварталов ‘самоорганизовались’. Порядок — договор, а не предмет.")
         k.order -= 6
         k.treasury -= 3
     if k.health < 30 and rng.random() < 0.30:
@@ -772,7 +780,8 @@ def init_game(seed: int) -> Kingdom:
         "**День первый — Трон и неизбежность.**\n\n"
         "Каждое утро вести стучатся в двери дворца.\n"
         "Каждый указ — либо гвоздь в гроб беды, либо гвоздь в крышку государства.\n\n"
-        "**Семь дней** — и королевство станет устойчивым… или станет историей."
+        "**Семь дней** — и королевство станет устойчивым… или станет историей.",
+        avatar="🕯️",
     )
     return k
 
@@ -791,7 +800,7 @@ def announce_event_if_needed(k: Kingdom):
     if k.announced_event_id == k.current_event_id:
         return
     ev = k.current_event
-    k.push("npc", f"{npc_header(ev['npc'])}\n\n{ev['intro']}")
+    k.push_npc(ev["npc"], f"{npc_header(ev['npc'])}\n\n{ev['intro']}")
     k.announced_event_id = k.current_event_id
 
 def new_day_event(k: Kingdom):
@@ -820,89 +829,17 @@ def diff(a: dict, b: dict) -> Dict[str, int]:
         out[key] = int(b[key]) - int(a[key])
     return {kk: vv for kk, vv in out.items() if vv != 0}
 
-def _delta_arrows(d: int) -> str:
-    """No digits: show direction + intensity."""
-    a = abs(int(d))
-    if a >= 12:
-        arrows = "⬆️⬆️⬆️" if d > 0 else "⬇️⬇️⬇️"
-    elif a >= 7:
-        arrows = "⬆️⬆️" if d > 0 else "⬇️⬇️"
-    else:
-        arrows = "⬆️" if d > 0 else "⬇️"
-    return arrows
-
 def deltas_line_readable(deltas: Dict[str, int]) -> str:
     """Readable deltas without numbers (chat-friendly)."""
     keys = ["treasury", "order", "health", "nobles", "faith", "border", "decay"]
     parts: List[str] = []
-    for k in keys:
-        if k in deltas and deltas[k] != 0:
-            d = int(deltas[k])
+    for key in keys:
+        if key in deltas and deltas[key] != 0:
+            d = int(deltas[key])
             color = "#22c55e" if d > 0 else "#ef4444"
             sign = "+" if d > 0 else "−"
-            parts.append(
-                f"<span style='color:{color}; font-weight:700'>{STAT_LABELS[k]} {sign}</span>"
-            )
+            parts.append(f"<span style='color:{color}; font-weight:700'>{STAT_LABELS[key]} {sign}</span>")
     return " · ".join(parts) if parts else "Сдвиги тихие. Это не значит — добрые."
-
-def stat_state_word(stat: str, v: int) -> str:
-    """Qualitative state only (no digits)."""
-    v = int(v)
-    if v >= 80:
-        tier = "цветёт"
-    elif v >= GREEN:
-        tier = "крепко держится"
-    elif v >= YELLOW:
-        tier = "шатается"
-    elif v >= 20:
-        tier = "хрипит"
-    else:
-        tier = "на краю"
-    return f"{STAT_LABELS.get(stat, stat)} — {tier}"
-
-def kingdom_states_line(k: Kingdom) -> str:
-    parts = [
-        stat_state_word("treasury", k.treasury),
-        stat_state_word("order", k.order),
-        stat_state_word("health", k.health),
-        stat_state_word("nobles", k.nobles),
-        stat_state_word("faith", k.faith),
-        stat_state_word("border", k.border),
-    ]
-    return " · ".join(parts)
-
-def choice_effect_preview(effects: dict) -> str:
-    """Short preview for radio options (no numbers)."""
-    show_keys = ["treasury", "order", "health", "nobles", "faith", "border"]
-    parts = []
-    for k in show_keys:
-        if k in effects and int(effects[k]) != 0:
-            d = int(effects[k])
-            parts.append(f"{STAT_LABELS[k]}{_delta_arrows(d)}")
-    if "tags_add" in effects:
-        parts.append("следы…")
-    return " · ".join(parts)
-
-
-def enhanced_ending(k: Kingdom, reasons: list[str]) -> str:
-    best = sorted(
-        [("Казна", k.treasury), ("Порядок", k.order), ("Здоровье", k.health),
-         ("Знать", k.nobles), ("Вера", k.faith), ("Граница", k.border)],
-        key=lambda x: x[1],
-        reverse=True
-    )
-    worst = sorted(best, key=lambda x: x[1])
-    best_lines = "\n".join([f"• {name} — {value}. Ещё держится." for name, value in best[:2]])
-    worst_lines = "\n".join([f"• {name} — {value}. Здесь трещина." for name, value in worst[:2]])
-    cause = reasons[-1] if reasons else "Мир устал от решений. Или их отсутствия."
-    tone = "🎉" if stable_state(k) else ("💀" if (k.decay>=6 or red_count(k)>=3) else "⚖️")
-    return (
-        f"{tone} **Суд семи дней вынес приговор.**\n\n"
-        f"**Лучшее в королевстве:**\n{best_lines}\n\n"
-        f"**Самые больные места:**\n{worst_lines}\n\n"
-        f"**Главная причина упадка:**\n{cause}\n\n"
-        f"И так завершилась неделя, где каждое слово стоило крови, а каждый указ — сна."
-    )
 
 def _ending_pick_best_worst(k: Kingdom) -> Tuple[str, str]:
     stats = {
@@ -920,56 +857,63 @@ def _ending_pick_best_worst(k: Kingdom) -> Tuple[str, str]:
 def _ending_stat_flair(stat_key: str, kind: str) -> str:
     best = {
         "treasury": "Казна ещё дышит — звон монет звучит, как редкий смех в склепе.",
-        "order": "Порядок держится — пока ещё люди верят, что закон не анекдот.",
-        "health": "Народ держится — кашель не стал гимном, и это уже праздник для мрачных.",
+        "order": "Порядок держится — пока люди верят, что закон не анекдот.",
+        "health": "Народ держится — кашель не стал гимном, и это уже милость.",
         "nobles": "Знать кланяется — на этот раз без явного скрипа клинков за спиной. Почти.",
         "faith": "Вера не рассыпалась в пепел — свечи горят, и город не грызёт себя до кости.",
-        "border": "Граница молчит — а молчание севера, как ни странно, сегодня добрая новость.",
+        "border": "Граница молчит — а молчание севера сегодня похоже на добрую новость.",
     }
     worst = {
         "treasury": "Казна хрипит: в сундуках сквозняк, и даже крысы смотрят с жалостью.",
         "order": "Порядок трещит: закон звучит как шутка, и смеются не те, кто должен.",
-        "health": "Здоровье народа — свеча на ветру. Ветер, увы, образован и настойчив.",
+        "health": "Здоровье народа — свеча на ветру. Ветер, увы, настойчив.",
         "nobles": "Знать улыбается — той самой улыбкой, которой обычно заканчиваются эпохи.",
         "faith": "Вера надломлена: молитвы стали короче, а подозрения — длиннее.",
         "border": "Граница кровоточит: север пишет письма стрелами, и почта работает без выходных.",
     }
     return (best if kind == "best" else worst).get(stat_key, "")
 
-def ending(k: Kingdom) -> str:
+def ending(k: Kingdom, reasons: List[str]) -> str:
     best_key, worst_key = _ending_pick_best_worst(k)
     collapse = (k.decay >= 6) or (red_count(k) >= 3)
 
+    # last “verdict line” — atmospheric summary of why things went so
+    if reasons:
+        verdict = " · ".join(dict.fromkeys(reasons[-3:]))  # keep last up to 3 unique, stable order
+        verdict_line = f"**Приговор недели:** {verdict}."
+    else:
+        verdict_line = "**Приговор недели:** судьба молчала — и это было громче любых речей."
+
     if stable_state(k):
-        return f"""✨🏰 **ПОБЕДА**
-
-Неделя прожита. Корона не упала — значит, мир сегодня ошибся в расчётах.
-Ты не исправил судьбу. Ты просто **не дал ей закончить фразу**.
-
-**Сильнейшая опора:** {STAT_LABELS.get(best_key, best_key)}. {_ending_stat_flair(best_key, "best")}
-
-**Самая опасная трещина:** {STAT_LABELS.get(worst_key, worst_key)}. {_ending_stat_flair(worst_key, "worst")}
-
-Хроникёр закрывает книгу. Перо дрожит — не от страха, а от привычки.
-"""
+        return (
+            "✨🏰 **ПОБЕДА**\n\n"
+            "Неделя прожита. Корона не упала — значит, мир сегодня ошибся в расчётах.\n"
+            "Ты не исправил судьбу. Ты просто **не дал ей закончить фразу**.\n\n"
+            f"**Сильнейшая опора:** {STAT_LABELS.get(best_key, best_key)}. {_ending_stat_flair(best_key, 'best')}\n\n"
+            f"**Самая опасная трещина:** {STAT_LABELS.get(worst_key, worst_key)}. {_ending_stat_flair(worst_key, 'worst')}\n\n"
+            f"{verdict_line}\n\n"
+            "Хроникёр закрывает книгу. Перо дрожит — не от страха, а от привычки.\n"
+        )
 
     if collapse:
-        epilogue = """Государство падает не красиво. Оно падает деловито: печати, подписи — и тишина.
-Трон ещё тёплый, но в зале уже обсуждают, кому он нужнее."""
+        epilogue = (
+            "Государство падает не красиво. Оно падает деловито: печати, подписи — и тишина.\n"
+            "Трон ещё тёплый, но в зале уже обсуждают, кому он нужнее."
+        )
     else:
-        epilogue = """Ты остался стоять, но королевство — с кашлем и нервным тиком.
-Это не конец. Это пауза перед тем, как беда попробует снова — уже с улыбкой."""
+        epilogue = (
+            "Ты остался стоять, но королевство — с кашлем и нервным тиком.\n"
+            "Это не конец. Это пауза перед тем, как беда попробует снова — уже с улыбкой."
+        )
 
-    return f"""💀🔥 **ПОРАЖЕНИЕ**
-
-{epilogue}
-
-**Лучшее, что уцелело:** {STAT_LABELS.get(best_key, best_key)}. {_ending_stat_flair(best_key, "best")}
-
-**Худшее, что тянуло ко дну:** {STAT_LABELS.get(worst_key, worst_key)}. {_ending_stat_flair(worst_key, "worst")}
-
-Ирония судьбы проста: когда королевство скрипит, шутки звучат громче — чтобы не слышать треск.
-"""
+    return (
+        "💀🔥 **ПОРАЖЕНИЕ**\n\n"
+        f"{epilogue}\n\n"
+        f"**Лучшее, что уцелело:** {STAT_LABELS.get(best_key, best_key)}. {_ending_stat_flair(best_key, 'best')}\n\n"
+        f"**Худшее, что тянуло ко дну:** {STAT_LABELS.get(worst_key, worst_key)}. {_ending_stat_flair(worst_key, 'worst')}\n\n"
+        f"{verdict_line}\n\n"
+        "Ирония судьбы проста: когда королевство скрипит, шутки звучат громче — чтобы не слышать треск.\n"
+    )
 
 def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
     rng = k.rng()
@@ -982,12 +926,19 @@ def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
     before_decay = k.decay
 
     ch = ev["choices"][choice_idx]
-    apply_effects(k, ch["effects"])
-    k.push("npc", ch.get("outro", "Указ произнесён. Мир моргнул — и записал это в книгу последствий."))
 
+    # --- Day: decree effects (NPC voice of the current event) ---
+    apply_effects(k, ch["effects"])
+    k.push_npc(ev["npc"], ch.get("outro", "Указ произнесён. Мир моргнул — и записал это в книгу последствий."))
+
+    # --- Night: system drift (Chronicle voice) ---
     drift_beats = system_end_of_day(k, rng)
-    for b in drift_beats:
-        k.push("npc", b)
+    if drift_beats:
+        k.push("narrator", "**Ночь прошла.**\n\nИногда тишина — не отсутствие беды, а её дыхание.", avatar="🕯️")
+        for b in drift_beats:
+            k.push("narrator", b, avatar="🕯️")
+    else:
+        k.push("narrator", "**Ночь прошла.**\n\nГород не устроил спектакль. Значит, копит актёров.", avatar="🕯️")
 
     after_mid = snapshot(k)
     ev_delta, ev_reasons = event_resolution_decay_delta(k, before, after_mid, ev)
@@ -998,35 +949,34 @@ def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
 
     decay_change = k.decay - before_decay
     reasons = ev_reasons + gl_reasons
-    if decay_change != 0:
-        sign = "+" if decay_change > 0 else ""
-        if reasons:
-            decay_explain = f"**Почему упадок {'+' if decay_change > 0 else '−'}:** " + "; ".join(reasons) + "."
-        else:
-            decay_explain = f"**Почему упадок {'+' if decay_change > 0 else '−'}:** так сложились обстоятельства (и твой указ)."
-    else:
-        decay_explain = ""
 
+    # --- End of day narration (no digits in “why”) ---
     k.tick_tags()
-
     k.day += 1
     k.clamp()
     after = snapshot(k)
 
     deltas = diff(before, after)
-
-    # store deltas for UI (right panel + choice previews)
     k.last_turn_deltas = dict(deltas)
-    k.last_turn_deltas = deltas
+
     narrator_parts = [
         f"**День {before['day']} завершён**\n\n",
         f"**Сдвиги:** {deltas_line_readable(deltas)}",
     ]
-    if decay_explain:
-        narrator_parts.append(decay_explain)
-    narrator_text = "\n\n".join(narrator_parts)
-    k.push("narrator", narrator_text)
 
+    if decay_change != 0:
+        if reasons:
+            narrator_parts.append(
+                f"**Упадок {decay_phrase(decay_change)}:** " + "; ".join(reasons) + "."
+            )
+        else:
+            narrator_parts.append(
+                f"**Упадок {decay_phrase(decay_change)}:** обстоятельства сложились так, что даже молчание стало решением."
+            )
+
+    k.push("narrator", "\n\n".join(narrator_parts), avatar="🕯️")
+
+    # analytics (kept, but not shown as links)
     log_event(k, {
         "type": "turn",
         "turn": before["day"],
@@ -1045,16 +995,16 @@ def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
 
     end = None
     if k.day > k.max_days:
-        end = ending(k)
-        enhanced = enhanced_ending(k, reasons)
-        k.push("narrator", enhanced)
+        end_text = ending(k, reasons)
+        k.push("narrator", end_text, avatar="🕯️")
         log_event(k, {
             "type": "end",
             "turn": k.max_days,
-            "ending": "win" if stable_state(k) else ("collapse" if (k.decay>=6 or red_count(k)>=3) else "edge"),
+            "ending": "win" if stable_state(k) else ("collapse" if (k.decay >= 6 or red_count(k) >= 3) else "edge"),
             "final": snapshot(k),
             "stability_score": stability_score(k),
         })
+        end = end_text
 
     return end
 
@@ -1064,7 +1014,8 @@ def play_choice(k: Kingdom, choice_idx: int) -> Optional[str]:
 # -----------------------------
 st.set_page_config(page_title="Королевство за Семь Дней", layout="wide")
 
-st.markdown("""
+st.markdown(
+    """
 <style>
 .block-container { padding-top: 1.0rem; max-width: 1400px; }
 .chat-feed {
@@ -1080,19 +1031,13 @@ st.markdown("""
   background: rgba(255,255,255,0.02);
 }
 .small { font-size: 0.9rem; opacity: 0.85; }
-.decay-wrap {
-  border: 1px solid rgba(255,255,255,0.10);
-  border-radius: 14px;
-  padding: 10px 12px;
-  background: rgba(255,255,255,0.02);
-}
-.decay-title { font-weight: 800; font-size: 1.05rem; }
-.decay-sub { opacity: 0.85; margin-top: 2px; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True
+)
 
 st.title("Королевство за Семь Дней")
-st.caption("Семь дней тебе дано — и ни мгновеньем более, что удержать корону на лезвии судьбы.")
+st.caption("Семь дней тебе дано — и ни мгновеньем более, чтоб удержать корону на лезвии судьбы.")
 
 with st.sidebar:
     st.header("Сессия")
@@ -1108,7 +1053,7 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Аналитика")
-    st.caption("Логи: `./analytics/<session>.jsonl`")
+    st.caption("Логи пишутся в локальную папку проекта.")
     if "k" in st.session_state:
         st.code(analytics_path(st.session_state["k"]), language="text")
 
@@ -1132,8 +1077,10 @@ left, right = st.columns([0.70, 0.30], gap="large")
 with right:
     st.subheader("Показатели")
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(f"**Упадок:** {k.decay}/10 · {decay_badge(k.decay)}")
+
+    st.markdown(f"**Упадок:** {decay_badge(k.decay)}")
     st.progress(k.decay / 10.0)
+
     st.markdown(f"- Казна: {zone(k.treasury)} {zone_name(k.treasury)}")
     st.markdown(f"- Порядок: {zone(k.order)} {zone_name(k.order)}")
     st.markdown(f"- Здоровье: {zone(k.health)} {zone_name(k.health)}")
@@ -1159,6 +1106,7 @@ with left:
         prev_len = st.session_state.get("prev_log_len", 0)
         current_len = len(k.log)
         start_idx = max(0, current_len - render_last)
+
         if not msgs:
             st.info("Пока пусто.")
         else:
@@ -1167,15 +1115,9 @@ with left:
                 if global_idx == prev_len:
                     st.markdown("<div id='new-start'></div>", unsafe_allow_html=True)
 
-                avatar = None
-                if m.role == "npc":
-                    avatar = NPCS.get(k.current_event.get("npc") if k.current_event else "", {}).get("emoji", "📜")
-                elif m.role == "narrator":
-                    avatar = "🕯️"
-                else:
-                    avatar = "👑"
-                with st.chat_message(ROLE_TO_CHAT[m.role], avatar=avatar):
+                with st.chat_message(ROLE_TO_CHAT[m.role], avatar=m.avatar):
                     st.markdown(f"{ROLE_PREFIX[m.role]}\n\n{m.content}", unsafe_allow_html=True)
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("### Решение трона")
@@ -1197,7 +1139,7 @@ with left:
         with b1:
             if st.button("Издать указ", type="primary", use_container_width=True, disabled=disabled):
                 st.session_state["prev_log_len"] = len(k.log)
-                k.push("player", f"Я решаю: **{choice_texts[choice_idx]}**")
+                k.push("player", f"Я решаю: **{choice_texts[choice_idx]}**", avatar="👑")
                 end = play_choice(k, choice_idx)
                 st.session_state["ending"] = end
                 if not st.session_state["ending"] and k.day <= k.max_days:
@@ -1207,7 +1149,8 @@ with left:
         with b2:
             if st.button("Пропустить (плохая идея)", use_container_width=True, disabled=disabled):
                 st.session_state["prev_log_len"] = len(k.log)
-                k.push("player", "Я решаю: **ничего не делать** (и надеюсь, что беда стесняется).")
+                k.push("player", "Я решаю: **ничего не делать** (и надеюсь, что беда стесняется).", avatar="👑")
+
                 k.current_event = {
                     "id": "skip",
                     "npc": "chancellor",
@@ -1235,10 +1178,10 @@ with st.expander("Активные следы решений"):
         st.caption("Пока ничего не прилипло.")
     else:
         for t in k.tags:
-            st.markdown(f"- `{t.name}` ещё **{t.days_left}** дн.")
+            st.markdown(f"- `{t.name}` — {tag_age_phrase(t.days_left)}")
 
 # ---- Hidden chat controls ----
 with st.expander("Настройки ленты (не трогать без нужды)"):
     st.session_state["chat_height"] = st.slider("Высота ленты", 250, 900, int(st.session_state.get("chat_height", 500)), 50)
     st.session_state["render_last"] = st.slider("Сколько сообщений показывать", 20, 200, int(st.session_state.get("render_last", 120)), 10)
-    st.caption("🟢 ≥60, 🟡 40–59, 🔴 <40. Упадок растёт, если кризис дня не купирован и/или есть 2+ 🔴 зоны.")
+    st.caption("🟢 ≥60, 🟡 40–59, 🔴 <40. Упадок растёт, если рана дня остаётся открытой и/или королевство трещит по швам.")
