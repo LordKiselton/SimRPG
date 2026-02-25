@@ -1,20 +1,34 @@
 # app.py
-# Lawforge — Streamlit прототип (Вариант A для текста событий)
+# Lawforge — Streamlit прототип (исправление задвоения + emoji законы + crit/dodge + новые законы + имена врагов)
 #
-# Изменения:
-# ✅ "Последние события" переименовано в "Ход Боя"
-# ✅ Тексты событий — Вариант A (человеческий боевой лог, чуть более развернутый)
-# ✅ Итог хода и свёртка серий — НЕ добавлялись (как просил)
-# ✅ Лечим баг "со второго клика":
-#    - кнопки на on_click + key
-#    - любое ручное действие выключает autoplay
-#    - multiselect key + on_change
-# ✅ При "Ход" события текущего тика показываются по одному (0.5s)
+# Сделано:
+# ✅ Починено задвоение событий:
+#    - при ручном "Ход" показываем ПОШТУЧНО только события тика (0.5с)
+#    - в этом же прогоне НЕ рендерим список истории (recent), чтобы не дублировать
+# ✅ Убран закон "Фокус" полностью
+# ✅ Всем законам добавлены emoji (в карточках/селекторе/хаосе) — совпадают с теми, что в логе боя
+# ✅ Добавлены базовые статы:
+#    - crit_chance (шанс крита)
+#    - dodge_chance (шанс уворота)
+#    - crit_mult (множитель крита)
+# ✅ Интегрировано в бой:
+#    - сначала уворот защитника (если сработал -> урона нет, понятное уведомление)
+#    - потом крит атакующего (если сработал -> x1.5, уведомление)
+#    - затем плоский "Щит" (срезает урон), затем отражение/кровоток/эхо и т.п.
+# ✅ Добавлены законы подхода 2:
+#    - 🗡️ Острие (увеличивает крит всем)
+#    - 🌑 Тень (увеличивает уворот всем)
+#    - + синергии с некоторыми законами
+# ✅ Враги получают имена из заранее заданных смешных дарк-фэнтези списков (без #номеров)
+# ✅ UI:
+#    - "Бой" -> "Автобой"
+#    - "Стоп" -> "Стоп Авто"
+#    - кнопки справа расположены друг под другом
 
 import time
 import random
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
@@ -30,6 +44,9 @@ class Unit:
     max_hp: float
     atk: float
     speed: float = 1.0
+    crit_chance: float = 0.05
+    dodge_chance: float = 0.03
+    crit_mult: float = 1.5
     tags: List[str] = field(default_factory=list)
     statuses: Dict[str, int] = field(default_factory=dict)
 
@@ -45,6 +62,7 @@ class Unit:
 @dataclass
 class Law:
     id: str
+    emoji: str
     name: str
     desc: str
     instability_cost: float
@@ -106,7 +124,36 @@ def attacks_per_tick(speed: float) -> int:
     return max(0, base + extra)
 
 
-# ---------------- Laws ----------------
+def pct(x: float) -> str:
+    return f"{int(round(x * 100))}%"
+
+
+# ---------------- Enemy names ----------------
+GOBLIN_NAMES = [
+    "Гоблин Боблин", "Гоблин Клоплин", "Гоблин Жмых", "Гоблин Хрип", "Гоблин Сопун",
+    "Гоблин Пшик", "Гоблин Шмыг", "Гоблин Кусь", "Гоблин Плюх", "Гоблин Чмок"
+]
+OGRE_NAMES = [
+    "Огр Грюм", "Огр Хряп", "Огр Дубинас", "Огр Мракобур", "Огр Плющ",
+    "Огр Круш", "Огр Трещ", "Огр Хмурд", "Огр Камнелоб", "Огр Скрипун"
+]
+FIEND_NAMES = [
+    "Бес Шустрик", "Бес Слизень", "Бес Тьмяк", "Бес Сверч", "Бес Пепел",
+    "Бес Хохот", "Бес Шмыгло", "Бес Колюч", "Бес Хрусть", "Бес Стук"
+]
+
+
+def pick_unique(pool: List[str], used: set) -> str:
+    candidates = [x for x in pool if x not in used]
+    if not candidates:
+        # fallback: allow repeats if exhausted
+        return random.choice(pool)
+    c = random.choice(candidates)
+    used.add(c)
+    return c
+
+
+# ---------------- Laws (core effects) ----------------
 def law_echo(sim: Dict):
     sim["global_mods"]["echo"] = True
 
@@ -145,78 +192,131 @@ def law_shield(sim: Dict):
 def law_bloom(sim: Dict):
     sim["global_mods"]["bloom"] = 8
 
-def law_focus(sim: Dict):
-    sim["global_mods"]["focus"] = True
+# NEW: Approach 2 laws
+def law_blade(sim: Dict):
+    # world rule: everyone crits more
+    sim["tick_mods"]["crit_bonus"] += 0.08  # +8% crit
+
+def law_shadow(sim: Dict):
+    # world rule: everyone dodges more
+    sim["tick_mods"]["dodge_bonus"] += 0.06  # +6% dodge
 
 
 ALL_LAWS: Dict[str, Law] = {
-    "echo":   Law("echo",   "Эхо",     "Каждый 2-й удар повторяется на 50%.",           0.22, law_echo),
-    "third":  Law("third",  "Третий",  "Каждый 3-й удар наносит x2.",                   0.25, law_third),
-    "thorn":  Law("thorn",  "Шипы",    "20% урона отражается атакующему.",              0.18, law_thorns),
-    "feast":  Law("feast",  "Пир",     "Убийца лечится; урон даёт небольшое лечение.",  0.20, law_feast),
-    "bleed":  Law("bleed",  "Кровь",   "Удар даёт кровоток (2 урона × 2 тика).",        0.19, law_bleed),
-    "lowhp":  Law("lowhp",  "Надлом",  "Цели <50% HP получают x1.4 урона.",             0.16, law_lowhp),
-    "slow":   Law("slow",   "Тягость", "Скорость всех -0.25.",                          0.14, law_slow),
-    "haste":  Law("haste",  "Порыв",   "Скорость всех +0.25.",                          0.18, law_haste),
-    "glass":  Law("glass",  "Стекло",  "Урон x1.25, но входящий x1.15.",                 0.23, law_glass),
-    "shield": Law("shield", "Щит",     "Первый удар по цели в тике -6 урона.",          0.17, law_shield),
-    "bloom":  Law("bloom",  "Всплеск", "Смерть вызывает отскок урона (8).",             0.21, law_bloom),
-    "focus":  Law("focus",  "Фокус",   "Повтор по цели усиливает урон (в тике).",       0.17, law_focus),
+    "echo":   Law("echo",   "🔁", "Эхо",     "Каждый 2-й удар повторяется на 50%.",           0.22, law_echo),
+    "third":  Law("third",  "✨", "Третий",  "Каждый 3-й удар наносит x2.",                   0.25, law_third),
+    "thorn":  Law("thorn",  "🌵", "Шипы",    "20% урона отражается атакующему.",              0.18, law_thorns),
+    "feast":  Law("feast",  "🍖", "Пир",     "Убийца лечится; урон даёт небольшое лечение.",  0.20, law_feast),
+    "bleed":  Law("bleed",  "🩸", "Кровь",   "Удар даёт кровоток (2 урона × 2 тика).",        0.19, law_bleed),
+    "lowhp":  Law("lowhp",  "💔", "Надлом",  "Цели <50% HP получают x1.4 урона.",             0.16, law_lowhp),
+    "slow":   Law("slow",   "🕳️", "Тягость","Скорость всех -0.25.",                          0.14, law_slow),
+    "haste":  Law("haste",  "⚡", "Порыв",   "Скорость всех +0.25.",                          0.18, law_haste),
+    "glass":  Law("glass",  "🪞", "Стекло",  "Урон x1.25, но входящий x1.15.",                 0.23, law_glass),
+    "shield": Law("shield", "🛡️", "Щит",    "Первый удар по цели в тике -6 урона.",          0.17, law_shield),
+    "bloom":  Law("bloom",  "💥", "Всплеск", "Смерть вызывает отскок урона (8).",             0.21, law_bloom),
+
+    # new
+    "blade":  Law("blade",  "🗡️", "Острие", "У всех выше шанс крита.",                         0.20, law_blade),
+    "shadow": Law("shadow", "🌑", "Тень",   "У всех выше шанс уворота.",                       0.18, law_shadow),
 }
 
 
 # ---------------- Synergies ----------------
-def syn_apply_third_echo(sim: Dict):
+# We keep synergies small + readable; they tweak existing bonuses.
+def syn_third_echo(sim: Dict):
+    # stronger echo repeat
     sim["tick_mods"]["echo_repeat_mul"] = 0.70
 
-def syn_apply_slow_lowhp(sim: Dict):
-    sim["tick_mods"]["slow_lowhp_bonus"] = True
-
-def syn_apply_glass_shield(sim: Dict):
+def syn_glass_shield(sim: Dict):
     sim["tick_mods"]["shield_bonus"] = 9
 
-def syn_apply_focus_bloom(sim: Dict):
-    sim["tick_mods"]["bloom_bonus"] = 12
-
-def syn_apply_thorn_haste(sim: Dict):
+def syn_thorn_haste(sim: Dict):
     sim["tick_mods"]["thorns_bonus"] = 0.28
 
+def syn_lowhp_slow(sim: Dict):
+    sim["tick_mods"]["slow_lowhp_bonus"] = True
+
+def syn_bloom_third(sim: Dict):
+    sim["tick_mods"]["bloom_bonus"] = 12
+
+# NEW synergies with approach 2 laws
+def syn_blade_third(sim: Dict):
+    # crits even nastier when "Third" exists
+    sim["tick_mods"]["crit_mult_bonus"] += 0.15
+
+def syn_blade_glass(sim: Dict):
+    # high risk, high reward
+    sim["tick_mods"]["crit_bonus"] += 0.04
+
+def syn_shadow_shield(sim: Dict):
+    # more defensive world
+    sim["tick_mods"]["dodge_bonus"] += 0.04
+
+def syn_shadow_slow(sim: Dict):
+    # sluggish fights => easier to slip away
+    sim["tick_mods"]["dodge_bonus"] += 0.03
+
 SYNERGIES: Dict[frozenset, Tuple[str, callable]] = {
-    frozenset(("third","echo")):   ("СИНЕРГИЯ: Эхо сильнее под «Третьим».", syn_apply_third_echo),
-    frozenset(("slow","lowhp")):   ("СИНЕРГИЯ: «Тягость» усиливает «Надлом».", syn_apply_slow_lowhp),
-    frozenset(("glass","shield")): ("СИНЕРГИЯ: «Щит» крепче под «Стеклом».", syn_apply_glass_shield),
-    frozenset(("focus","bloom")):  ("СИНЕРГИЯ: «Всплеск» сильнее при «Фокусе».", syn_apply_focus_bloom),
-    frozenset(("thorn","haste")):  ("СИНЕРГИЯ: «Шипы» злее на «Порыве».", syn_apply_thorn_haste),
+    frozenset(("third","echo")):   ("СИНЕРГИЯ: 🔁 Эхо сильнее под ✨ Третьим.", syn_third_echo),
+    frozenset(("glass","shield")): ("СИНЕРГИЯ: 🛡️ Щит крепче под 🪞 Стеклом.", syn_glass_shield),
+    frozenset(("thorn","haste")):  ("СИНЕРГИЯ: 🌵 Шипы злее на ⚡ Порыве.", syn_thorn_haste),
+    frozenset(("lowhp","slow")):   ("СИНЕРГИЯ: 💔 Надлом сильнее при 🕳️ Тягости.", syn_lowhp_slow),
+    frozenset(("bloom","third")):  ("СИНЕРГИЯ: 💥 Всплеск сильнее под ✨ Третьим.", syn_bloom_third),
+
+    # new
+    frozenset(("blade","third")):  ("СИНЕРГИЯ: 🗡️ Острие + ✨ Третий → крит больнее.", syn_blade_third),
+    frozenset(("blade","glass")):  ("СИНЕРГИЯ: 🗡️ Острие + 🪞 Стекло → крита больше.", syn_blade_glass),
+    frozenset(("shadow","shield")):("СИНЕРГИЯ: 🌑 Тень + 🛡️ Щит → уворота больше.", syn_shadow_shield),
+    frozenset(("shadow","slow")):  ("СИНЕРГИЯ: 🌑 Тень + 🕳️ Тягость → уворота больше.", syn_shadow_slow),
 }
 
 
 # ---------------- Balance: waves & hero ----------------
 def spawn_wave(wave: int) -> List[Unit]:
-    n = 3 + wave  # wave1 -> 4 enemies
+    """
+    Баланс: wave1 проходима даже без законов.
+    Враги с небольшими crit/dodge, чтобы RNG не ломал.
+    """
+    n = 3 + wave  # wave1 => 4
     enemies: List[Unit] = []
-    for i in range(n):
+    used_names = set()
+
+    for _ in range(n):
         t = random.choices(["grunt","brute","skirm"], weights=[0.55,0.20,0.25], k=1)[0]
+
         if t == "grunt":
             hp = 16 + wave * 2.0
             atk = 3.2 + wave * 0.25
             spd = 1.0
-            enemies.append(Unit(f"Пехотинец#{i+1}", hp=hp, max_hp=hp, atk=atk, speed=spd, tags=["grunt"]))
+            nm = pick_unique(GOBLIN_NAMES, used_names)
+            enemies.append(Unit(nm, hp=hp, max_hp=hp, atk=atk, speed=spd,
+                                crit_chance=0.04, dodge_chance=0.03, crit_mult=1.5, tags=["grunt"]))
         elif t == "brute":
             hp = 44 + wave * 4.0
             atk = 7.5 + wave * 0.45
             spd = 0.75
-            enemies.append(Unit(f"Огр#{i+1}", hp=hp, max_hp=hp, atk=atk, speed=spd, tags=["brute"]))
+            nm = pick_unique(OGRE_NAMES, used_names)
+            enemies.append(Unit(nm, hp=hp, max_hp=hp, atk=atk, speed=spd,
+                                crit_chance=0.03, dodge_chance=0.02, crit_mult=1.5, tags=["brute"]))
         else:
             hp = 11 + wave * 1.4
             atk = 2.4 + wave * 0.18
             spd = 1.55
-            enemies.append(Unit(f"Бегун#{i+1}", hp=hp, max_hp=hp, atk=atk, speed=spd, tags=["skirm"]))
+            nm = pick_unique(FIEND_NAMES, used_names)
+            enemies.append(Unit(nm, hp=hp, max_hp=hp, atk=atk, speed=spd,
+                                crit_chance=0.05, dodge_chance=0.04, crit_mult=1.5, tags=["skirm"]))
+
     return enemies
 
 
 def reset_run(full_metrics: bool = True):
     st.session_state.wave = 1
-    st.session_state.hero = Unit("Чернокнижник", hp=115.0, max_hp=115.0, atk=12.0, speed=1.0, tags=["hero"])
+    st.session_state.hero = Unit(
+        "Чернокнижник",
+        hp=115.0, max_hp=115.0, atk=12.0, speed=1.0,
+        crit_chance=0.07, dodge_chance=0.05, crit_mult=1.5,
+        tags=["hero"]
+    )
     st.session_state.enemies = spawn_wave(st.session_state.wave)
     st.session_state.instability = 0.0
     st.session_state.tick = 0
@@ -236,7 +336,12 @@ def reset_run(full_metrics: bool = True):
 
 def start_next_wave():
     st.session_state.wave += 1
-    st.session_state.hero = Unit("Чернокнижник", hp=115.0, max_hp=115.0, atk=12.0, speed=1.0, tags=["hero"])
+    st.session_state.hero = Unit(
+        "Чернокнижник",
+        hp=115.0, max_hp=115.0, atk=12.0, speed=1.0,
+        crit_chance=0.07, dodge_chance=0.05, crit_mult=1.5,
+        tags=["hero"]
+    )
     st.session_state.enemies = spawn_wave(st.session_state.wave)
     st.session_state.instability = 0.0
     st.session_state.tick = 0
@@ -252,7 +357,7 @@ def start_next_wave():
     st.session_state.laws_sel = list(st.session_state.active_laws)
 
 
-# ---------------- Combat core (Variant A text) ----------------
+# ---------------- Combat core ----------------
 def apply_statuses(unit: Unit, tick_events: List[str]):
     if not unit.is_alive():
         return
@@ -287,17 +392,52 @@ def maybe_trigger_chaos(sim: Dict, tick_events: List[str]):
             lid = random.choice(st.session_state.active_laws)
             st.session_state.active_laws.remove(lid)
             st.session_state.laws_sel = list(st.session_state.active_laws)
-            tick_events.append(f"{fmt_tag('🌀 Хаос')} стирает закон «{ALL_LAWS[lid].name}».")
+            law = ALL_LAWS[lid]
+            tick_events.append(f"{fmt_tag('🌀 Хаос')} стирает закон «{law.emoji} {law.name}».")
             log_full("chaos", f"Erase law {lid}")
 
     st.session_state.instability *= 0.45
 
 
-def damage_pipeline(attacker: Unit, defender: Unit, base: float, sim: Dict, hit_index: int, tick_events: List[str]) -> float:
+def roll_dodge(defender: Unit, sim: Dict) -> bool:
+    chance = clamp(defender.dodge_chance + sim["tick_mods"]["dodge_bonus"], 0.0, 0.65)
+    return random.random() < chance
+
+
+def roll_crit(attacker: Unit, sim: Dict) -> bool:
+    chance = clamp(attacker.crit_chance + sim["tick_mods"]["crit_bonus"], 0.0, 0.75)
+    return random.random() < chance
+
+
+def damage_pipeline(
+    attacker: Unit,
+    defender: Unit,
+    base: float,
+    sim: Dict,
+    hit_index: int,
+    tick_events: List[str],
+    context: str
+) -> float:
+    """
+    Order:
+    1) Dodge check (defender)
+    2) Laws multipliers (out/taken, third, lowhp)
+    3) Crit (attacker)
+    4) Shield flat reduction
+    """
+    # 1) Dodge
+    if roll_dodge(defender, sim):
+        tick_events.append(f"{fmt_tag('💨 Уворот')} {defender.name} уходит от удара ({context}).")
+        log_full("dodge", f"{defender.name} dodges vs {attacker.name}")
+        return 0.0
+
     dmg = base
+
+    # global multipliers
     dmg *= sim["tick_mods"]["damage_out_mul"]
     dmg *= sim["tick_mods"]["damage_taken_mul"]
 
+    # per-target taken (e.g., lowhp)
     tm = sim["target_mods"].get(defender.name, {})
     dmg *= tm.get("taken_mul", 1.0)
 
@@ -307,7 +447,14 @@ def damage_pipeline(attacker: Unit, defender: Unit, base: float, sim: Dict, hit_
         tick_events.append(f"{fmt_tag('✨ Третий')} это 3-е попадание — урон удвоен.")
         log_full("proc", f"Third doubled (hit={hit_index})")
 
-    # Shield flat: first hit to defender per tick
+    # 3) Crit
+    if roll_crit(attacker, sim):
+        mult = attacker.crit_mult + sim["tick_mods"]["crit_mult_bonus"]
+        dmg *= mult
+        tick_events.append(f"{fmt_tag('✨ Крит')} удача на стороне {attacker.name} (x{mult:.2f}).")
+        log_full("crit", f"{attacker.name} crits x{mult:.2f}")
+
+    # 4) Shield flat: first hit to defender per tick
     shield_flat = sim["global_mods"].get("shield_flat", 0)
     if shield_flat > 0 and not sim["shield_used"].get(defender.name, False):
         flat = shield_flat
@@ -325,35 +472,45 @@ def damage_pipeline(attacker: Unit, defender: Unit, base: float, sim: Dict, hit_
     return dmg
 
 
-def on_hit_apply_effects(attacker: Unit, defender: Unit, dealt: float, sim: Dict, tick_events: List[str]):
+def on_hit_apply_effects(attacker: Unit, defender: Unit, dealt: float, sim: Dict, tick_events: List[str], context: str):
+    if dealt <= 0:
+        return
+
     # Thorns reflect
     th = sim["global_mods"].get("thorns", 0.0)
     if sim["tick_mods"].get("thorns_bonus") is not None:
         th = sim["tick_mods"]["thorns_bonus"]
-    if th and dealt > 0:
+    if th:
         r = dealt * th
         attacker.hp -= r
         tick_events.append(f"{fmt_tag('🌵 Шипы')} отвечают: {attacker.name} получает {fmt_dmg(r)}.")
         log_full("proc", f"Thorns reflect {r:.1f} to {attacker.name}")
 
     # Bleed
-    if sim["global_mods"].get("bleed") and dealt > 0:
+    if sim["global_mods"].get("bleed"):
         _, ticks = sim["global_mods"]["bleed"]
         defender.statuses["bleed"] = max(defender.statuses.get("bleed", 0), ticks)
         tick_events.append(f"{fmt_tag('🩸 Кровь')} на {defender.name}: кровоток на {ticks} тика(ов).")
         log_full("proc", f"Bleed applied to {defender.name} ({ticks} ticks)")
 
+    # Feast (small sustain per hit)
+    if sim["global_mods"].get("feast"):
+        heal = dealt * sim["global_mods"]["feast"] * 0.35
+        attacker.hp = min(attacker.max_hp, attacker.hp + heal)
+        # не шумим отдельной строкой — это “тихий” эффект
+        log_full("proc", f"Feast heal {heal:.1f} to {attacker.name}")
+
     # Echo repeat: every 2nd global hit repeats at mul
     if sim["global_mods"].get("echo") and sim["hit_count"] % 2 == 0:
         mul = sim["tick_mods"].get("echo_repeat_mul", 0.5)
-        rep = damage_pipeline(attacker, defender, attacker.atk * mul, sim, sim["hit_count"], tick_events)
+        rep = damage_pipeline(attacker, defender, attacker.atk * mul, sim, sim["hit_count"], tick_events, context=f"{context}, повтор")
         defender.hp -= rep
         tick_events.append(f"{fmt_tag('🔁 Эхо')} повторяет удар по {defender.name}: {fmt_dmg(rep)}.")
         log_full("proc", f"Echo repeat {rep:.1f} to {defender.name}")
 
 
 def on_kill(sim: Dict, tick_events: List[str]):
-    # Bloom collateral
+    # Bloom collateral (still mostly player-favored; we keep as-is for now)
     if sim["global_mods"].get("bloom"):
         bounce = sim["global_mods"]["bloom"]
         if sim["tick_mods"].get("bloom_bonus") is not None:
@@ -389,16 +546,23 @@ def sim_tick() -> List[str]:
             "damage_out_mul": 1.0,
             "damage_taken_mul": 1.0,
             "speed_delta": 0.0,
+
             "echo_repeat_mul": 0.5,
             "shield_bonus": None,
             "bloom_bonus": None,
             "thorns_bonus": None,
             "slow_lowhp_bonus": False,
+
+            # crit/dodge world bonuses
+            "crit_bonus": 0.0,
+            "dodge_bonus": 0.0,
+            "crit_mult_bonus": 0.0,
         },
         "target_mods": {},
         "global_mods": {},
         "shield_used": {},
         "hit_count": st.session_state.counters["hit"],
+        "chaos_done": False,
     }
 
     # instability grows per active law
@@ -421,6 +585,9 @@ def sim_tick() -> List[str]:
     # apply speed delta (temporary)
     for u in [hero] + enemies:
         u.speed = max(0.2, u.speed + sim["tick_mods"]["speed_delta"])
+
+    # lowhp law needs current hp ratios
+    # (it is applied via apply_fn already)
 
     # chaos
     maybe_trigger_chaos(sim, tick_events)
@@ -462,13 +629,14 @@ def sim_tick() -> List[str]:
         st.session_state.counters["hit"] += 1
         sim["hit_count"] = st.session_state.counters["hit"]
 
-        dmg = damage_pipeline(hero, target, hero.atk, sim, st.session_state.counters["hit"], tick_events)
+        dmg = damage_pipeline(hero, target, hero.atk, sim, st.session_state.counters["hit"], tick_events, context="удар героя")
         target.hp -= dmg
 
-        tick_events.append(f"🧙 {hero.name} бьёт {target.name}: {fmt_dmg(dmg)}.")
-        log_full("hero", f"{hero.name} hits {target.name} for {dmg:.1f}")
+        if dmg > 0:
+            tick_events.append(f"🧙 {hero.name} бьёт {target.name}: {fmt_dmg(dmg)}.")
+            log_full("hero", f"{hero.name} hits {target.name} for {dmg:.1f}")
 
-        on_hit_apply_effects(hero, target, dmg, sim, tick_events)
+        on_hit_apply_effects(hero, target, dmg, sim, tick_events, context="удар героя")
 
         if target.hp <= 0:
             tick_events.append(f"{fmt_tag('💀 Смерть')} {target.name} погибает.")
@@ -488,13 +656,14 @@ def sim_tick() -> List[str]:
             st.session_state.counters["hit"] += 1
             sim["hit_count"] = st.session_state.counters["hit"]
 
-            dmg = damage_pipeline(e, hero, e.atk, sim, st.session_state.counters["hit"], tick_events)
+            dmg = damage_pipeline(e, hero, e.atk, sim, st.session_state.counters["hit"], tick_events, context=f"удар {e.name}")
             hero.hp -= dmg
 
-            tick_events.append(f"👹 {e.name} атакует героя: {fmt_dmg(dmg)}.")
-            log_full("enemy", f"{e.name} hits {hero.name} for {dmg:.1f}")
+            if dmg > 0:
+                tick_events.append(f"👹 {e.name} атакует героя: {fmt_dmg(dmg)}.")
+                log_full("enemy", f"{e.name} hits {hero.name} for {dmg:.1f}")
 
-            on_hit_apply_effects(e, hero, dmg, sim, tick_events)
+            on_hit_apply_effects(e, hero, dmg, sim, tick_events, context=f"удар {e.name}")
 
             if hero.hp <= 0:
                 break
@@ -523,7 +692,7 @@ def sim_tick() -> List[str]:
     return tick_events
 
 
-# ---------------- UI callbacks (fix "second click") ----------------
+# ---------------- UI callbacks ----------------
 def cb_laws_change():
     st.session_state.autoplay = False
     st.session_state.active_laws = list(st.session_state.laws_sel)
@@ -577,7 +746,7 @@ def card_css():
 
 def unit_line(u: Unit, emoji: str):
     st.markdown(f"**{emoji} {u.name}**")
-    st.caption(f"ATK {u.atk:.1f} · SPD {u.speed:.2f}")
+    st.caption(f"ATK {u.atk:.1f} · SPD {u.speed:.2f} · CRIT {pct(u.crit_chance)} · EVA {pct(u.dodge_chance)}")
     st.progress(u.hp_ratio(), text=f"HP {max(0,u.hp):.1f}/{u.max_hp:.1f}")
 
 
@@ -590,7 +759,7 @@ def render_left_laws():
         options=options,
         default=st.session_state.active_laws,
         max_selections=2,
-        format_func=lambda lid: ALL_LAWS[lid].name,
+        format_func=lambda lid: f"{ALL_LAWS[lid].emoji} {ALL_LAWS[lid].name}",
         key="laws_sel",
         on_change=cb_laws_change,
         label_visibility="collapsed"
@@ -603,7 +772,7 @@ def render_left_laws():
         st.markdown(
             f"""
             <div class="law-card">
-              <div class="law-title">{picked}{law.name}</div>
+              <div class="law-title">{picked}{law.emoji} {law.name}</div>
               <div class="law-desc">{law.desc}</div>
               <div class="tiny">+{law.instability_cost:.2f} нестаб./тик</div>
             </div>
@@ -621,12 +790,12 @@ def render_left_laws():
 def render_right_controls_and_battle():
     disabled = st.session_state.battle_state != "RUNNING"
 
-    c1, c2, c3 = st.columns(3)
-    c1.button("Ход", disabled=disabled, on_click=cb_step, key="btn_step")
-    c2.button("Бой", disabled=disabled, on_click=cb_run,  key="btn_run")
-    c3.button("Стоп", on_click=cb_stop, key="btn_stop")
+    # buttons stacked
+    st.button("Ход", disabled=disabled, on_click=cb_step, key="btn_step")
+    st.button("Автобой", disabled=disabled, on_click=cb_run, key="btn_run")
+    st.button("Стоп Авто", on_click=cb_stop, key="btn_stop")
 
-    st.slider("Скорость (сек/тик)", 0.05, 0.6, st.session_state.autoplay_delay, 0.01, key="autoplay_delay")
+    st.slider("Скорость (сек/ход)", 0.05, 0.6, st.session_state.autoplay_delay, 0.01, key="autoplay_delay")
 
     st.divider()
     st.subheader("Бой")
@@ -655,7 +824,8 @@ def render_middle_events():
     st.divider()
     st.subheader("Ход Боя")
 
-    # play tick events gradually (only after manual Step)
+    # ✅ FIX DUPLICATION:
+    # If we are in play_mode (manual step), we render ONLY the animated tick events and STOP.
     if st.session_state.play_mode and st.session_state.play_tick_events:
         ph = st.empty()
         shown: List[str] = []
@@ -665,6 +835,8 @@ def render_middle_events():
             time.sleep(0.5)
         st.session_state.play_mode = False
         st.session_state.play_tick_events = []
+        # Do NOT render recent list in this run (prevents doubling)
+        return
 
     if not st.session_state.recent:
         st.write("—")
@@ -696,7 +868,15 @@ def render_bottom_expander():
 ss("active_laws", [])
 ss("laws_sel", [])
 ss("wave", 1)
-ss("hero", Unit("Чернокнижник", hp=115.0, max_hp=115.0, atk=12.0, speed=1.0, tags=["hero"]))
+ss(
+    "hero",
+    Unit(
+        "Чернокнижник",
+        hp=115.0, max_hp=115.0, atk=12.0, speed=1.0,
+        crit_chance=0.07, dodge_chance=0.05, crit_mult=1.5,
+        tags=["hero"]
+    )
+)
 ss("enemies", spawn_wave(1))
 ss("instability", 0.0)
 ss("tick", 0)
