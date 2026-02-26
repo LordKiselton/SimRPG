@@ -435,8 +435,9 @@ with tabs[2]:
                             translations[lang] = translate_openai_cached(
                                 base_text, src_lang=base_lang, tgt_lang=lang, model=model
                             )
-                        except Exception:
-                            # не роняем генерацию — просто оставляем оригинал
+                        except Exception as e:
+                            st.error(f"Ошибка перевода для {lang}: {e}")
+                            # показываем ошибку
                             translations[lang] = base_text
             else:
                 # без AI — просто копируем базовый текст
