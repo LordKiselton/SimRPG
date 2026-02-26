@@ -116,36 +116,29 @@ def validate_json(text: str):
 
 def compact_settings(tab_key: str):
     """
-    Компактные настройки СВЕРХУ:
-      - timezone слева (default UTC)
-      - unit справа
-    Подписи под ними убраны (как просил).
+    Настройки сверху:
+      1) Таймзона
+      2) Единицы (s/ms) — ПОД таймзоной
     """
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        tz_name = st.selectbox(
-            "timezone",
-            options=["UTC", "Asia/Yerevan", "Europe/Moscow", "Europe/London", "America/Los_Angeles"],
-            index=0,  # UTC default
-            key=f"{tab_key}_tz",
-            label_visibility="collapsed",
-        )
-    with c2:
-        unit = st.radio(
-            "unit",
-            ["s", "ms"],
-            horizontal=True,
-            key=f"{tab_key}_unit",
-            label_visibility="collapsed",
-        )
+    tz_name = st.selectbox(
+        "timezone",
+        options=["UTC", "Asia/Yerevan", "Europe/Moscow", "Europe/London", "America/Los_Angeles"],
+        index=0,  # UTC default
+        key=f"{tab_key}_tz",
+        label_visibility="collapsed",
+    )
+    unit = st.radio(
+        "unit",
+        ["s", "ms"],
+        horizontal=True,
+        key=f"{tab_key}_unit",
+        label_visibility="collapsed",
+    )
     return unit, ZoneInfo(tz_name)
 
 
 def time_pair_controls(prefix: str, tz: ZoneInfo):
-    """
-    Минимальный ввод времени: дата + одно поле time_input (пикер + ручной ввод).
-    Ввод трактуем как время в выбранной таймзоне.
-    """
+    """Дата + одно поле time_input (пикер + ручной ввод)."""
     c1, c2 = st.columns(2)
     with c1:
         sd = st.date_input("Дата старта", key=f"{prefix}_sd")
@@ -164,14 +157,12 @@ def time_pair_controls(prefix: str, tz: ZoneInfo):
 st.set_page_config(page_title="GD Multitool", page_icon="🛠", layout="wide")
 st.title("🛠 GD Multitool")
 
-# CSS: делаем селект таймзоны заметно уже (и в целом настройку компактнее)
+# CSS: делаем селект таймзоны заметно уже
 st.markdown(
     """
     <style>
-      /* Сужаем selectbox (таймзону) примерно в ~4 раза относительно широких контейнеров */
       div[data-testid="stSelectbox"] { max-width: 240px; }
-      /* Немного компактнее радиокнопки для s/ms */
-      div[data-testid="stRadio"] { max-width: 140px; }
+      div[data-testid="stRadio"] { max-width: 200px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -253,12 +244,9 @@ with tabs[1]:
             for ts in found[:400]:
                 guessed = guess_unit(ts)
                 dt_utc = from_unix(ts, unit=guessed)  # tz-aware UTC datetime
-                rows.append((
-                    ts,
-                    guessed,
-                    fmt_dt(dt_utc, tz),   # в выбранной TZ
-                    fmt_utc(dt_utc),      # GMT+0 / UTC
-                ))
+                rows.append(
+                    (ts, guessed, fmt_dt(dt_utc, tz), fmt_utc(dt_utc))
+                )
 
             st.session_state["dec_rows"] = rows
 
@@ -267,7 +255,6 @@ with tabs[1]:
         if not rows:
             st.info("Здесь появится таблица после поиска.")
         else:
-            # Проверено: rows имеет 4 колонки, и column_config соответствует индексам 0..3
             st.dataframe(
                 rows,
                 use_container_width=True,
