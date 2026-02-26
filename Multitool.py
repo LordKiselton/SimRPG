@@ -141,6 +141,23 @@ def copy_button_responsive(label: str, text_to_copy: str, key: str):
     components.html(html, height=54)
 
 
+def subtle_card_open():
+    st.markdown('<div class="gd-card">', unsafe_allow_html=True)
+
+
+def subtle_card_close():
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def thin_divider():
+    st.markdown('<div class="gd-divider"></div>', unsafe_allow_html=True)
+
+
+def io_headers():
+    # consistent titles + thin divider line between left & right blocks will be placed via columns layout
+    pass
+
+
 # -------------------- Time / JSON helpers --------------------
 
 def parse_time_text(s: str):
@@ -218,10 +235,13 @@ def validate_json(text: str):
 
 def compact_settings(tab_key: str):
     """
-    Настройки сверху:
-      1) Таймзона (default UTC)
-      2) Единицы (s/ms) — под таймзоной
+    Settings block:
+      - timezone (default UTC)
+      - unit (s/ms) under it
     """
+    subtle_card_open()
+    st.markdown('<div class="gd-section-title">Настройки</div>', unsafe_allow_html=True)
+
     tz_name = st.selectbox(
         "timezone",
         options=["UTC", "Asia/Yerevan", "Europe/Moscow", "Europe/London", "America/Los_Angeles"],
@@ -236,12 +256,13 @@ def compact_settings(tab_key: str):
         key=f"{tab_key}_unit",
         label_visibility="collapsed",
     )
+    subtle_card_close()
     return unit, ZoneInfo(tz_name)
 
 
 def time_pair_controls(prefix: str, tz: ZoneInfo):
     """
-    Дата + удобный ввод времени текстом (HH:MM или HH:MM:SS).
+    Date + convenient time text inputs.
     Returns: (start_dt_local, end_dt_local, ok_bool)
     """
     c1, c2 = st.columns(2)
@@ -335,12 +356,39 @@ def build_locale_tsv_from_rows(rows: list[dict]) -> str:
 st.set_page_config(page_title="GD Multitool", page_icon="🛠", layout="wide")
 st.title("🛠 GD Multitool")
 
-# CSS: compact selectors
+# Global CSS: compact + subtle containers + thin divider
 st.markdown(
     """
     <style>
+      /* Compact selectors */
       div[data-testid="stSelectbox"] { max-width: 240px; }
       div[data-testid="stRadio"] { max-width: 220px; }
+
+      /* Subtle card container */
+      .gd-card {
+        border: 1px solid rgba(49, 51, 63, 0.12);
+        border-radius: 14px;
+        padding: 14px 14px 12px 14px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      .gd-section-title {
+        font-size: 0.95rem;
+        font-weight: 600;
+        opacity: 0.85;
+        margin-bottom: 10px;
+      }
+
+      /* Thin divider */
+      .gd-divider {
+        height: 1px;
+        background: rgba(49, 51, 63, 0.12);
+        margin: 10px 0 12px 0;
+      }
+
+      /* Reduce default vertical gaps a bit */
+      .block-container { padding-top: 1.25rem; }
+      div[data-testid="stVerticalBlock"] > div { gap: 0.75rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -349,14 +397,17 @@ st.markdown(
 tabs = st.tabs(["🧩 Подстановка UNIX", "🔎 Расшифровка UNIX", "🌐 Создание локали"])
 
 
-# -------------------- Tab: Replace --------------------
+# -------------------- Tab 1: Replace --------------------
 with tabs[0]:
     unit, tz = compact_settings("rep")
-    st.divider()
+    thin_divider()
 
-    left, right = st.columns([1, 1])
+    left, right = st.columns([1, 1], gap="large")
 
     with left:
+        subtle_card_open()
+        st.markdown('<div class="gd-section-title">Ввод</div>', unsafe_allow_html=True)
+
         start_local, end_local, ok_time = time_pair_controls("rep_time", tz)
 
         if ok_time:
@@ -368,7 +419,7 @@ with tabs[0]:
         else:
             start_ts = end_ts = None
 
-        src = st.text_area("Текст / JSON", value=DEFAULT_TEXT, height=280, key="rep_src")
+        src = st.text_area("Текст / JSON", value=DEFAULT_TEXT, height=260, key="rep_src")
 
         p1, p2 = st.columns(2)
         with p1:
@@ -380,7 +431,12 @@ with tabs[0]:
         if do_replace:
             st.session_state["rep_result"] = replace_placeholders(src, ph_start, ph_end, start_ts, end_ts)
 
+        subtle_card_close()
+
     with right:
+        subtle_card_open()
+        st.markdown('<div class="gd-section-title">Результат</div>', unsafe_allow_html=True)
+
         result = st.session_state.get("rep_result", "")
         if not result:
             st.info("Здесь появится результат после подстановки.")
@@ -406,16 +462,21 @@ with tabs[0]:
                 st.code(result, language="text")
                 copy_button_responsive("Скопировать raw", result, key="copy_rep_raw")
 
+        subtle_card_close()
 
-# -------------------- Tab: Decode --------------------
+
+# -------------------- Tab 2: Decode --------------------
 with tabs[1]:
     _, tz = compact_settings("dec")
-    st.divider()
+    thin_divider()
 
-    left, right = st.columns([1, 1])
+    left, right = st.columns([1, 1], gap="large")
 
     with left:
-        src = st.text_area("Текст / JSON", value=DEFAULT_TEXT, height=340, key="dec_src")
+        subtle_card_open()
+        st.markdown('<div class="gd-section-title">Ввод</div>', unsafe_allow_html=True)
+
+        src = st.text_area("Текст / JSON", value=DEFAULT_TEXT, height=300, key="dec_src")
         if st.button("Найти timestamps", type="primary", key="dec_btn"):
             found = find_timestamps(src, min_len=10)
 
@@ -427,7 +488,12 @@ with tabs[1]:
 
             st.session_state["dec_rows"] = rows
 
+        subtle_card_close()
+
     with right:
+        subtle_card_open()
+        st.markdown('<div class="gd-section-title">Результат</div>', unsafe_allow_html=True)
+
         rows = st.session_state.get("dec_rows", [])
         if not rows:
             st.info("Здесь появится таблица после поиска.")
@@ -443,14 +509,19 @@ with tabs[1]:
                 },
             )
 
+        subtle_card_close()
 
-# -------------------- Tab: Locale creation --------------------
+
+# -------------------- Tab 3: Locale creation --------------------
 with tabs[2]:
-    left, right = st.columns([1, 1])
+    left, right = st.columns([1, 1], gap="large")
 
     with left:
+        subtle_card_open()
+        st.markdown('<div class="gd-section-title">Ввод</div>', unsafe_allow_html=True)
+
         ident = st.text_input("Ident", key="loc_ident", placeholder="GUILDVERSUS_CITY_ENTRY_POINT")
-        base_text = st.text_area("Text", key="loc_text", height=120, placeholder="Текст на базовом языке")
+        base_text = st.text_area("Text", key="loc_text", height=110, placeholder="Текст на базовом языке")
         appear_ident = st.text_input("AppearIdent", key="loc_appear", placeholder="eventVS")
 
         base_lang = st.selectbox("Lang", options=LANGS, index=0, key="loc_lang")  # default ru
@@ -463,8 +534,10 @@ with tabs[2]:
         if use_ai:
             if not OPENAI_AVAILABLE:
                 st.warning("Для автоперевода установи: pip install openai")
+                can_translate = False
             elif not api_key:
                 st.warning("В secrets/env не найден OPENAI_API_KEY — автоперевод отключён.")
+                can_translate = False
             else:
                 try:
                     model_ids = list_models_openai_cached(api_key)
@@ -508,11 +581,9 @@ with tabs[2]:
                                 api_key=api_key,
                             )
                         except Exception as e:
-                            # show real error (no silent fail)
                             st.error(f"Ошибка перевода для {lang}: {e}")
                             translations[lang] = base_text.strip()
             else:
-                # No AI: keep base text for all langs (still produces valid table/TSV)
                 translations = {lang: base_text.strip() for lang in LANGS if lang != base_lang}
 
             locale_rows = build_locale_rows(
@@ -527,9 +598,14 @@ with tabs[2]:
             st.session_state["loc_rows"] = locale_rows
             st.session_state["loc_tsv"] = build_locale_tsv_from_rows(locale_rows)
 
+        subtle_card_close()
+
     with right:
+        subtle_card_open()
+        st.markdown('<div class="gd-section-title">Результат</div>', unsafe_allow_html=True)
+
         if not PANDAS_AVAILABLE:
-            st.error("Для табличного вывода локалей нужен пакет pandas. Добавь `pandas` в requirements.txt.")
+            st.error("Для табличного вывода локалей нужен pandas. Добавь `pandas` в requirements.txt.")
         else:
             rows = st.session_state.get("loc_rows", [])
             tsv = st.session_state.get("loc_tsv", "")
@@ -538,13 +614,9 @@ with tabs[2]:
                 st.info("Здесь появится таблица после генерации.")
             else:
                 df = pd.DataFrame(rows)
+                st.dataframe(df, use_container_width=True, hide_index=True)
 
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
+                # Exports
                 csv_data = df.to_csv(index=False)
                 st.download_button(
                     label="Скачать CSV",
@@ -555,3 +627,5 @@ with tabs[2]:
 
                 if tsv:
                     copy_button_responsive("Скопировать TSV", tsv, key="copy_loc_tsv")
+
+        subtle_card_close()
