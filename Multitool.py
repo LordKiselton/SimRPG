@@ -1,12 +1,22 @@
 import re
+import os
 import json
 import streamlit as st
 import streamlit.components.v1 as components
 from datetime import datetime, time, timezone
 from zoneinfo import ZoneInfo
 
+# Optional OpenAI dependency
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except Exception:
+    OPENAI_AVAILABLE = False
 
-# -------------------- Helpers --------------------
+
+# -------------------- Constants --------------------
+
+LANGS = ["ru", "de", "en", "es", "fr", "it", "ja", "ko", "pl", "pt", "zh-cn", "zh-tw"]
 
 DEFAULT_TEXT = '''{
   "questEventGroup": { "groupId": 182, "order": 1 },
@@ -19,6 +29,8 @@ DEFAULT_TEXT = '''{
   "enable": 1
 }'''
 
+
+# -------------------- UI helpers --------------------
 
 def copy_button_responsive(label: str, text_to_copy: str, key: str):
     """JS-кнопка копирования с быстрым визуальным фидбеком без перерендера."""
@@ -65,6 +77,8 @@ def copy_button_responsive(label: str, text_to_copy: str, key: str):
     """
     components.html(html, height=54)
 
+
+# -------------------- Time / JSON helpers --------------------
 
 def parse_time_text(s: str):
     """
@@ -142,13 +156,13 @@ def validate_json(text: str):
 def compact_settings(tab_key: str):
     """
     Настройки сверху:
-      1) Таймзона
+      1) Таймзона (default UTC)
       2) Единицы (s/ms) — под таймзоной
     """
     tz_name = st.selectbox(
         "timezone",
         options=["UTC", "Asia/Yerevan", "Europe/Moscow", "Europe/London", "America/Los_Angeles"],
-        index=0,  # UTC default
+        index=0,
         key=f"{tab_key}_tz",
         label_visibility="collapsed",
     )
@@ -164,10 +178,8 @@ def compact_settings(tab_key: str):
 
 def time_pair_controls(prefix: str, tz: ZoneInfo):
     """
-    Дата + улучшенный ввод времени текстом (удобно стирать/править):
-      - HH:MM или HH:MM:SS
-    Возвращает:
-      (start_dt_local, end_dt_local, ok_bool)
+    Дата + удобный ввод времени текстом (HH:MM или HH:MM:SS).
+    Returns: (start_dt_local, end_dt_local, ok_bool)
     """
     c1, c2 = st.columns(2)
 
@@ -177,14 +189,12 @@ def time_pair_controls(prefix: str, tz: ZoneInfo):
             "Время старта",
             value=st.session_state.get(f"{prefix}_st_text", "00:00"),
             key=f"{prefix}_st_text",
-            help="Формат: HH:MM или HH:MM:SS. Можно свободно стирать/вводить.",
             placeholder="09:30",
         )
         st_t, st_norm, st_err = parse_time_text(st_text)
         if st_err:
             st.error(st_err)
         else:
-            # нормализуем без лишних перерисовок: обновляем только если отличается
             if st_norm != st_text:
                 st.session_state[f"{prefix}_st_text"] = st_norm
 
@@ -194,7 +204,6 @@ def time_pair_controls(prefix: str, tz: ZoneInfo):
             "Время финиша",
             value=st.session_state.get(f"{prefix}_et_text", "23:59"),
             key=f"{prefix}_et_text",
-            help="Формат: HH:MM или HH:MM:SS. Можно свободно стирать/вводить.",
             placeholder="18:00",
         )
         et_t, et_norm, et_err = parse_time_text(et_text)
@@ -213,23 +222,79 @@ def time_pair_controls(prefix: str, tz: ZoneInfo):
     return start_local, end_local, True
 
 
+# -------------------- Localization helpers --------------------
+
+def now_last_update_str() -> str:
+    # формат как в примере: "YYYY-MM-DD HH:MM:SS"
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+@st.cache_data(show_spinner=False)
+def translate_openai_cached(text: str, src_lang: str, tgt_lang: str, model: str) -> str:
+    """
+    Кешируем переводы, чтобы не платить/не ждать повторно при тех же входных.
+    """
+    if not OPENAI_AVAILABLE:
+        raise RuntimeError("OpenAI SDK не установлен. Установи: pip install openai")
+
+    # API key from env var OPENAI_API_KEY
+    client = OpenAI()
+
+    # Переводим строго: только текст, без кавычек/объяснений.
+    prompt = (
+        f"Translate the text from {src_lang} to {tgt_lang}.\n"
+        f"Rules:\n"
+        f"- Return ONLY the translated text, no quotes, no explanations.\n"
+        f"- Preserve placeholders/tokens exactly if present (e.g., {{0}}, %s, \\n, <color=...>, [tag]).\n"
+        f"- Keep game/UI tone natural.\n\n"
+        f"TEXT:\n{text}"
+    )
+
+    resp = client.responses.create(
+        model=model,
+        input=prompt,
+    )
+    out = (resp.output_text or "").strip()
+    return out if out else text
+
+
+def build_locale_tsv(
+    ident: str,
+    base_lang: str,
+    base_text: str,
+    appear_ident: str,
+    translations: dict[str, str],
+    last_update: str,
+) -> str:
+    """
+    Формируем TSV: header + 12 rows.
+    description/deleted/_comment fixed as requested.
+    """
+    header = "ident\tlang\ttext\tlastUpdateDate\tdescription\tdeleted\t_comment\tappearIdent"
+    rows = [header]
+    for lang in LANGS:
+        text = base_text if lang == base_lang else translations.get(lang, base_text)
+        row = f"{ident}\t{lang}\t{text}\t{last_update}\tNULL\t0\tNULL\t{appear_ident}"
+        rows.append(row)
+    return "\n".join(rows)
+
+
 # -------------------- App --------------------
 
 st.set_page_config(page_title="GD Multitool", page_icon="🛠", layout="wide")
 st.title("🛠 GD Multitool")
 
-# CSS: делаем селект таймзоны уже
 st.markdown(
     """
     <style>
       div[data-testid="stSelectbox"] { max-width: 240px; }
-      div[data-testid="stRadio"] { max-width: 200px; }
+      div[data-testid="stRadio"] { max-width: 220px; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-tabs = st.tabs(["🧩 Подстановка UNIX", "🔎 Расшифровка UNIX"])
+tabs = st.tabs(["🧩 Подстановка UNIX", "🔎 Расшифровка UNIX", "🌐 Создание локали"])
 
 
 # -------------------- Tab: Replace --------------------
@@ -280,7 +345,6 @@ with tabs[0]:
                     label_visibility="collapsed",
                     key="rep_json_view",
                 )
-
                 if view_mode == "Pretty":
                     st.code(pretty, language="json")
                     copy_button_responsive("Скопировать pretty", pretty, key="copy_rep_pretty")
@@ -328,3 +392,70 @@ with tabs[1]:
                     3: st.column_config.TextColumn("GMT+0"),
                 },
             )
+
+
+# -------------------- Tab: Locale creation --------------------
+with tabs[2]:
+    left, right = st.columns([1, 1])
+
+    with left:
+        ident = st.text_input("Ident", key="loc_ident", placeholder="GUILDVERSUS_CITY_ENTRY_POINT")
+        base_text = st.text_area("Text", key="loc_text", height=120, placeholder="Текст на базовом языке")
+        appear_ident = st.text_input("AppearIdent", key="loc_appear", placeholder="eventVS")
+
+        base_lang = st.selectbox("Lang", options=LANGS, index=0, key="loc_lang")  # default ru
+
+        use_ai = st.checkbox("Автоперевод нейросетью", value=True, key="loc_use_ai")
+        model = st.text_input("Модель (OpenAI)", value="gpt-5.2-mini", key="loc_model")
+
+        can_translate = use_ai and OPENAI_AVAILABLE and bool(os.getenv("OPENAI_API_KEY"))
+
+        if use_ai and not OPENAI_AVAILABLE:
+            st.warning("Для автоперевода установи пакет: pip install openai")
+        if use_ai and OPENAI_AVAILABLE and not os.getenv("OPENAI_API_KEY"):
+            st.warning("Для автоперевода задай OPENAI_API_KEY в переменных окружения.")
+
+        gen = st.button(
+            "Сгенерировать TSV",
+            type="primary",
+            key="loc_gen",
+            disabled=not (ident.strip() and base_text.strip() and appear_ident.strip()),
+        )
+
+        if gen:
+            last_update = now_last_update_str()
+
+            translations = {}
+            if can_translate:
+                with st.spinner("Перевожу…"):
+                    for lang in LANGS:
+                        if lang == base_lang:
+                            continue
+                        try:
+                            translations[lang] = translate_openai_cached(
+                                base_text, src_lang=base_lang, tgt_lang=lang, model=model
+                            )
+                        except Exception:
+                            # не роняем генерацию — просто оставляем оригинал
+                            translations[lang] = base_text
+            else:
+                # без AI — просто копируем базовый текст
+                translations = {lang: base_text for lang in LANGS if lang != base_lang}
+
+            tsv = build_locale_tsv(
+                ident=ident.strip(),
+                base_lang=base_lang,
+                base_text=base_text.strip(),
+                appear_ident=appear_ident.strip(),
+                translations=translations,
+                last_update=last_update,
+            )
+            st.session_state["loc_tsv"] = tsv
+
+    with right:
+        tsv = st.session_state.get("loc_tsv", "")
+        if not tsv:
+            st.info("Здесь появится TSV после генерации.")
+        else:
+            st.code(tsv, language="text")
+            copy_button_responsive("Скопировать TSV", tsv, key="copy_loc_tsv")
