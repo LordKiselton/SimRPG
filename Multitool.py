@@ -66,6 +66,31 @@ def copy_button_responsive(label: str, text_to_copy: str, key: str):
     components.html(html, height=54)
 
 
+def parse_time_text(s: str):
+    """
+    Parse HH:MM or HH:MM:SS.
+    Returns: (time_obj or None, normalized_str or None, error_str or None)
+    """
+    s = (s or "").strip()
+    if not s:
+        return None, None, "Введи время (HH:MM или HH:MM:SS)"
+
+    m = re.fullmatch(r"(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?", s)
+    if not m:
+        return None, None, "Неверный формат. Пример: 09:30 или 09:30:15"
+
+    h = int(m.group(1))
+    mi = int(m.group(2))
+    se = int(m.group(3)) if m.group(3) is not None else 0
+
+    if not (0 <= h <= 23 and 0 <= mi <= 59 and 0 <= se <= 59):
+        return None, None, "Некорректное время (часы 0–23, минуты/секунды 0–59)"
+
+    t = time(h, mi, se)
+    norm = f"{h:02d}:{mi:02d}" + (f":{se:02d}" if m.group(3) is not None else "")
+    return t, norm, None
+
+
 def to_unix(dt_utc: datetime, unit: str) -> int:
     ts = int(dt_utc.timestamp())
     return ts if unit == "s" else ts * 1000
@@ -118,7 +143,7 @@ def compact_settings(tab_key: str):
     """
     Настройки сверху:
       1) Таймзона
-      2) Единицы (s/ms) — ПОД таймзоной
+      2) Единицы (s/ms) — под таймзоной
     """
     tz_name = st.selectbox(
         "timezone",
@@ -138,18 +163,54 @@ def compact_settings(tab_key: str):
 
 
 def time_pair_controls(prefix: str, tz: ZoneInfo):
-    """Дата + одно поле time_input (пикер + ручной ввод)."""
+    """
+    Дата + улучшенный ввод времени текстом (удобно стирать/править):
+      - HH:MM или HH:MM:SS
+    Возвращает:
+      (start_dt_local, end_dt_local, ok_bool)
+    """
     c1, c2 = st.columns(2)
+
     with c1:
         sd = st.date_input("Дата старта", key=f"{prefix}_sd")
-        stime = st.time_input("Время старта", value=time(0, 0), key=f"{prefix}_st")
+        st_text = st.text_input(
+            "Время старта",
+            value=st.session_state.get(f"{prefix}_st_text", "00:00"),
+            key=f"{prefix}_st_text",
+            help="Формат: HH:MM или HH:MM:SS. Можно свободно стирать/вводить.",
+            placeholder="09:30",
+        )
+        st_t, st_norm, st_err = parse_time_text(st_text)
+        if st_err:
+            st.error(st_err)
+        else:
+            # нормализуем без лишних перерисовок: обновляем только если отличается
+            if st_norm != st_text:
+                st.session_state[f"{prefix}_st_text"] = st_norm
+
     with c2:
         ed = st.date_input("Дата финиша", key=f"{prefix}_ed")
-        etime = st.time_input("Время финиша", value=time(23, 59), key=f"{prefix}_et")
+        et_text = st.text_input(
+            "Время финиша",
+            value=st.session_state.get(f"{prefix}_et_text", "23:59"),
+            key=f"{prefix}_et_text",
+            help="Формат: HH:MM или HH:MM:SS. Можно свободно стирать/вводить.",
+            placeholder="18:00",
+        )
+        et_t, et_norm, et_err = parse_time_text(et_text)
+        if et_err:
+            st.error(et_err)
+        else:
+            if et_norm != et_text:
+                st.session_state[f"{prefix}_et_text"] = et_norm
 
-    start_local = datetime.combine(sd, stime).replace(tzinfo=tz)
-    end_local = datetime.combine(ed, etime).replace(tzinfo=tz)
-    return start_local, end_local
+    ok = (st_t is not None) and (et_t is not None)
+    if not ok:
+        return None, None, False
+
+    start_local = datetime.combine(sd, st_t).replace(tzinfo=tz)
+    end_local = datetime.combine(ed, et_t).replace(tzinfo=tz)
+    return start_local, end_local, True
 
 
 # -------------------- App --------------------
@@ -157,7 +218,7 @@ def time_pair_controls(prefix: str, tz: ZoneInfo):
 st.set_page_config(page_title="GD Multitool", page_icon="🛠", layout="wide")
 st.title("🛠 GD Multitool")
 
-# CSS: делаем селект таймзоны заметно уже
+# CSS: делаем селект таймзоны уже
 st.markdown(
     """
     <style>
@@ -179,14 +240,17 @@ with tabs[0]:
     left, right = st.columns([1, 1])
 
     with left:
-        start_local, end_local = time_pair_controls("rep_time", tz)
+        start_local, end_local, ok_time = time_pair_controls("rep_time", tz)
 
-        if end_local < start_local:
-            st.warning("Финиш раньше старта.")
+        if ok_time:
+            if end_local < start_local:
+                st.warning("Финиш раньше старта.")
 
-        start_ts = to_unix(start_local.astimezone(timezone.utc), unit)
-        end_ts = to_unix(end_local.astimezone(timezone.utc), unit)
-        st.caption(f"Start: `{start_ts}`  |  End: `{end_ts}`")
+            start_ts = to_unix(start_local.astimezone(timezone.utc), unit)
+            end_ts = to_unix(end_local.astimezone(timezone.utc), unit)
+            st.caption(f"Start: `{start_ts}`  |  End: `{end_ts}`")
+        else:
+            start_ts = end_ts = None
 
         src = st.text_area("Текст / JSON", value=DEFAULT_TEXT, height=280, key="rep_src")
 
@@ -196,7 +260,8 @@ with tabs[0]:
         with p2:
             ph_end = st.text_input("Плейсхолдер финиша", value="ВРЕМЯ ЗАВЕРШЕНИЯ", key="rep_phe")
 
-        if st.button("Подставить", type="primary", key="rep_btn"):
+        do_replace = st.button("Подставить", type="primary", key="rep_btn", disabled=not ok_time)
+        if do_replace:
             st.session_state["rep_result"] = replace_placeholders(src, ph_start, ph_end, start_ts, end_ts)
 
     with right:
@@ -244,9 +309,7 @@ with tabs[1]:
             for ts in found[:400]:
                 guessed = guess_unit(ts)
                 dt_utc = from_unix(ts, unit=guessed)  # tz-aware UTC datetime
-                rows.append(
-                    (ts, guessed, fmt_dt(dt_utc, tz), fmt_utc(dt_utc))
-                )
+                rows.append((ts, guessed, fmt_dt(dt_utc, tz), fmt_utc(dt_utc)))
 
             st.session_state["dec_rows"] = rows
 
