@@ -13,6 +13,13 @@ try:
 except Exception:
     OPENAI_AVAILABLE = False
 
+# Optional pandas dependency (for locale table)
+try:
+    import pandas as pd
+    PANDAS_AVAILABLE = True
+except Exception:
+    PANDAS_AVAILABLE = False
+
 
 # -------------------- Constants --------------------
 
@@ -34,7 +41,10 @@ DEFAULT_TEXT = '''{
 
 def get_openai_key() -> str | None:
     # Secrets preferred, env as fallback
-    return (st.secrets.get("OPENAI_API_KEY", None) if hasattr(st, "secrets") else None) or os.getenv("OPENAI_API_KEY")
+    try:
+        return st.secrets.get("OPENAI_API_KEY", None) or os.getenv("OPENAI_API_KEY")
+    except Exception:
+        return os.getenv("OPENAI_API_KEY")
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
@@ -47,7 +57,7 @@ def list_models_openai_cached(api_key: str) -> list[str]:
     models = client.models.list()
     ids = [m.id for m in models.data if getattr(m, "id", None)]
 
-    # Keep likely chat/text models and sort. (You can loosen this filter if needed.)
+    # Keep likely chat/text models and sort
     preferred_prefixes = ("gpt-", "o-")
     ids = [mid for mid in ids if mid.startswith(preferred_prefixes)]
     ids.sort()
@@ -281,22 +291,43 @@ def now_last_update_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def build_locale_tsv(
+def build_locale_rows(
     ident: str,
     base_lang: str,
     base_text: str,
     appear_ident: str,
     translations: dict[str, str],
     last_update: str,
-) -> str:
-    header = "ident\tlang\ttext\tlastUpdateDate\tdescription\tdeleted\t_comment\tappearIdent"
-    rows = [header]
+) -> list[dict]:
+    """
+    Build structured rows for table + export.
+    """
+    rows = []
     for lang in LANGS:
         text_val = base_text if lang == base_lang else translations.get(lang, base_text)
-        # Keep these columns exactly as requested:
-        row = f"{ident}\t{lang}\t{text_val}\t{last_update}\tNULL\t0\tNULL\t{appear_ident}"
-        rows.append(row)
-    return "\n".join(rows)
+        rows.append(
+            {
+                "ident": ident,
+                "lang": lang,
+                "text": text_val,
+                "lastUpdateDate": last_update,
+                "description": "NULL",
+                "deleted": "0",
+                "_comment": "NULL",
+                "appearIdent": appear_ident,
+            }
+        )
+    return rows
+
+
+def build_locale_tsv_from_rows(rows: list[dict]) -> str:
+    header = "ident\tlang\ttext\tlastUpdateDate\tdescription\tdeleted\t_comment\tappearIdent"
+    lines = [header]
+    for r in rows:
+        lines.append(
+            f"{r['ident']}\t{r['lang']}\t{r['text']}\t{r['lastUpdateDate']}\t{r['description']}\t{r['deleted']}\t{r['_comment']}\t{r['appearIdent']}"
+        )
+    return "\n".join(lines)
 
 
 # -------------------- App --------------------
@@ -423,14 +454,12 @@ with tabs[2]:
         appear_ident = st.text_input("AppearIdent", key="loc_appear", placeholder="eventVS")
 
         base_lang = st.selectbox("Lang", options=LANGS, index=0, key="loc_lang")  # default ru
-
         use_ai = st.checkbox("Автоперевод нейросетью", value=True, key="loc_use_ai")
 
         api_key = get_openai_key()
         can_translate = use_ai and OPENAI_AVAILABLE and bool(api_key)
 
-        # Model dropdown (actual models)
-        selected_model = None
+        selected_model = "gpt-4o-mini"
         if use_ai:
             if not OPENAI_AVAILABLE:
                 st.warning("Для автоперевода установи: pip install openai")
@@ -439,11 +468,7 @@ with tabs[2]:
             else:
                 try:
                     model_ids = list_models_openai_cached(api_key)
-                    if not model_ids:
-                        st.warning("Не удалось найти доступные модели для этого ключа.")
-                        can_translate = False
-                        selected_model = "gpt-4o-mini"
-                    else:
+                    if model_ids:
                         default_model = "gpt-4o-mini" if "gpt-4o-mini" in model_ids else model_ids[0]
                         selected_model = st.selectbox(
                             "Model",
@@ -451,15 +476,15 @@ with tabs[2]:
                             index=model_ids.index(default_model),
                             key="loc_model_select",
                         )
+                    else:
+                        st.warning("Список моделей пуст — автоперевод отключён.")
+                        can_translate = False
                 except Exception as e:
                     st.error(f"Не удалось загрузить список моделей: {e}")
                     can_translate = False
-                    selected_model = "gpt-4o-mini"
-        else:
-            selected_model = "gpt-4o-mini"
 
         gen = st.button(
-            "Сгенерировать TSV",
+            "Сгенерировать",
             type="primary",
             key="loc_gen",
             disabled=not (ident.strip() and base_text.strip() and appear_ident.strip()),
@@ -469,7 +494,7 @@ with tabs[2]:
             last_update = now_last_update_str()
             translations: dict[str, str] = {}
 
-            if can_translate and selected_model:
+            if can_translate:
                 with st.spinner("Перевожу…"):
                     for lang in LANGS:
                         if lang == base_lang:
@@ -483,14 +508,14 @@ with tabs[2]:
                                 api_key=api_key,
                             )
                         except Exception as e:
-                            # Show the real error (so it won't look like "did nothing")
+                            # show real error (no silent fail)
                             st.error(f"Ошибка перевода для {lang}: {e}")
                             translations[lang] = base_text.strip()
             else:
-                # No AI: keep base text for all langs (still produces valid TSV)
+                # No AI: keep base text for all langs (still produces valid table/TSV)
                 translations = {lang: base_text.strip() for lang in LANGS if lang != base_lang}
 
-            tsv = build_locale_tsv(
+            locale_rows = build_locale_rows(
                 ident=ident.strip(),
                 base_lang=base_lang,
                 base_text=base_text.strip(),
@@ -498,12 +523,35 @@ with tabs[2]:
                 translations=translations,
                 last_update=last_update,
             )
-            st.session_state["loc_tsv"] = tsv
+
+            st.session_state["loc_rows"] = locale_rows
+            st.session_state["loc_tsv"] = build_locale_tsv_from_rows(locale_rows)
 
     with right:
-        tsv = st.session_state.get("loc_tsv", "")
-        if not tsv:
-            st.info("Здесь появится TSV после генерации.")
+        if not PANDAS_AVAILABLE:
+            st.error("Для табличного вывода локалей нужен пакет pandas. Добавь `pandas` в requirements.txt.")
         else:
-            st.code(tsv, language="text")
-            copy_button_responsive("Скопировать TSV", tsv, key="copy_loc_tsv")
+            rows = st.session_state.get("loc_rows", [])
+            tsv = st.session_state.get("loc_tsv", "")
+
+            if not rows:
+                st.info("Здесь появится таблица после генерации.")
+            else:
+                df = pd.DataFrame(rows)
+
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                csv_data = df.to_csv(index=False)
+                st.download_button(
+                    label="Скачать CSV",
+                    data=csv_data,
+                    file_name="localization.csv",
+                    mime="text/csv",
+                )
+
+                if tsv:
+                    copy_button_responsive("Скопировать TSV", tsv, key="copy_loc_tsv")
