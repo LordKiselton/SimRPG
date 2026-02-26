@@ -21,9 +21,7 @@ DEFAULT_TEXT = '''{
 
 
 def copy_button_responsive(label: str, text_to_copy: str, key: str):
-    """
-    Быстрая JS-кнопка копирования с визуальным фидбеком без перерендера Streamlit.
-    """
+    """JS-кнопка копирования с быстрым визуальным фидбеком без перерендера."""
     safe_text = json.dumps(text_to_copy)
     html = f"""
     <div>
@@ -89,7 +87,6 @@ def find_timestamps(text: str, min_len: int = 10) -> list[int]:
 
 
 def guess_unit(ts: int) -> str:
-    # простая эвристика по длине
     digits = len(str(abs(ts)))
     return "ms" if digits >= 13 else "s"
 
@@ -100,10 +97,7 @@ def fmt_dt(dt_utc: datetime, tz: ZoneInfo) -> str:
 
 
 def compact_settings(tab_key: str):
-    """
-    Компактная строка: unit + timezone.
-    Лейблы скрыты, чтобы не раздувать UI.
-    """
+    """Компактная строка настроек: unit + timezone (без жирных заголовков)."""
     c1, c2 = st.columns([1, 2])
     with c1:
         unit = st.radio(
@@ -121,19 +115,19 @@ def compact_settings(tab_key: str):
             key=f"{tab_key}_tz",
             label_visibility="collapsed",
         )
-    # маленькие подписи вместо заголовков
-    hint_c1, hint_c2 = st.columns([1, 2])
-    with hint_c1:
+
+    # короткие подписи (без заголовков)
+    hc1, hc2 = st.columns([1, 2])
+    with hc1:
         st.caption("Единицы")
-    with hint_c2:
+    with hc2:
         st.caption("Таймзона")
+
     return unit, ZoneInfo(tz_name)
 
 
 def time_pair_controls(prefix: str, tz: ZoneInfo):
-    """
-    Минимальный ввод времени: дата + одно поле time_input (пикер + ручной ввод).
-    """
+    """Минимальный ввод времени: дата + одно поле time_input (пикер + ручной ввод)."""
     c1, c2 = st.columns(2)
     with c1:
         sd = st.date_input("Дата старта", key=f"{prefix}_sd")
@@ -148,17 +142,13 @@ def time_pair_controls(prefix: str, tz: ZoneInfo):
 
 
 def validate_json(text: str):
-    """
-    Возвращает:
-      (ok: bool, data_or_err: object/str, pretty: str|None, minified: str|None)
-    """
+    """(ok, info, pretty, minified)"""
     try:
         data = json.loads(text)
         pretty = json.dumps(data, ensure_ascii=False, indent=2)
         minified = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        return True, data, pretty, minified
+        return True, "OK", pretty, minified
     except json.JSONDecodeError as e:
-        # e.lineno / e.colno
         return False, f"{e.msg} (строка {e.lineno}, колонка {e.colno})", None, None
     except Exception as e:
         return False, str(e), None, None
@@ -174,6 +164,7 @@ tabs = st.tabs(["🧩 Подстановка", "🔎 Расшифровка"])
 # -------------------- Tab: Replace --------------------
 with tabs[0]:
     unit, tz = compact_settings("rep")
+    st.divider()  # отделяем настройки от основного контента
 
     left, right = st.columns([1, 1])
 
@@ -185,7 +176,6 @@ with tabs[0]:
 
         start_ts = to_unix(start_local.astimezone(timezone.utc), unit)
         end_ts = to_unix(end_local.astimezone(timezone.utc), unit)
-
         st.caption(f"Start: `{start_ts}`  |  End: `{end_ts}`")
 
         src = st.text_area("Текст / JSON", value=DEFAULT_TEXT, height=280, key="rep_src")
@@ -203,12 +193,11 @@ with tabs[0]:
 
     with right:
         result = st.session_state.get("rep_result", "")
-        st.text_area("Результат", value=result, height=280, disabled=True, key="rep_out")
-
-        if result:
-            copy_button_responsive("Скопировать", result, key="copy_rep")
-
+        if not result:
+            st.info("Здесь появится результат после подстановки.")
+        else:
             ok, info, pretty, minified = validate_json(result)
+
             if ok:
                 st.success("JSON валиден")
                 view_mode = st.radio(
@@ -218,19 +207,24 @@ with tabs[0]:
                     label_visibility="collapsed",
                     key="rep_json_view",
                 )
+
                 if view_mode == "Pretty":
                     st.code(pretty, language="json")
                     copy_button_responsive("Скопировать pretty", pretty, key="copy_rep_pretty")
                 else:
                     st.code(minified, language="json")
                     copy_button_responsive("Скопировать minified", minified, key="copy_rep_minified")
+
             else:
                 st.error(f"JSON невалиден: {info}")
+                st.code(result, language="text")
+                copy_button_responsive("Скопировать raw", result, key="copy_rep_raw")
 
 
 # -------------------- Tab: Decode --------------------
 with tabs[1]:
     _, tz = compact_settings("dec")
+    st.divider()  # отделяем настройки от основного контента
 
     left, right = st.columns([1, 1])
 
