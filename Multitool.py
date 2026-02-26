@@ -8,50 +8,6 @@ from zoneinfo import ZoneInfo
 
 # -------------------- Helpers --------------------
 
-def copy_button(label: str, text_to_copy: str, key: str):
-    safe_text = json.dumps(text_to_copy)
-    html = f"""
-    <script>
-    function copyToClipboard_{key}() {{
-        navigator.clipboard.writeText({safe_text});
-    }}
-    </script>
-    <button onclick="copyToClipboard_{key}()" style="
-        padding: 0.42rem 0.85rem;
-        border-radius: 0.55rem;
-        border: 1px solid #D0D0D0;
-        background: white;
-        cursor: pointer;
-        font-size: 0.95rem;
-    ">{label}</button>
-    """
-    components.html(html, height=52)
-
-def to_unix(dt_utc: datetime, unit: str) -> int:
-    ts = int(dt_utc.timestamp())
-    return ts if unit == "s" else ts * 1000
-
-def from_unix(ts: int, unit: str) -> datetime:
-    if unit == "ms":
-        ts = ts / 1000
-    return datetime.fromtimestamp(ts, tz=timezone.utc)
-
-def replace_placeholders(text: str, ph_start: str, ph_end: str, start_ts: int, end_ts: int) -> str:
-    return text.replace(ph_start, str(start_ts)).replace(ph_end, str(end_ts))
-
-def find_timestamps(text: str, min_len: int = 10) -> list[int]:
-    pattern = r"(?<!\d)(\d{" + str(min_len) + r",})(?!\d)"
-    return [int(m.group(1)) for m in re.finditer(pattern, text)]
-
-def guess_unit(ts: int) -> str:
-    digits = len(str(abs(ts)))
-    return "ms" if digits >= 13 else "s"
-
-def fmt_dt(dt_utc: datetime, tz: ZoneInfo) -> str:
-    local_dt = dt_utc.astimezone(tz)
-    return local_dt.strftime("%Y-%m-%d %H:%M:%S") + f" ({tz.key})"
-
-
 DEFAULT_TEXT = '''{
   "questEventGroup": { "groupId": 182, "order": 1 },
   "teamLevel": 1,
@@ -64,134 +20,244 @@ DEFAULT_TEXT = '''{
 }'''
 
 
-def time_controls_block(key_prefix: str, tz: ZoneInfo):
+def copy_button_responsive(label: str, text_to_copy: str, key: str):
     """
-    Только 2 поля:
-      - дата
-      - время (один input, который умеет и пикер, и ручной ввод)
+    Быстрая JS-кнопка копирования с визуальным фидбеком без перерендера Streamlit.
     """
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        d = st.date_input("Дата", key=f"{key_prefix}_date")
-    with col2:
-        t = st.time_input(
-            "Время",
-            key=f"{key_prefix}_time",
-            value=time(0, 0) if "start" in key_prefix else time(23, 59),
-            help="Можно выбрать из пикера или напечатать вручную (HH:MM).",
-        )
-    dt_local = datetime.combine(d, t).replace(tzinfo=tz)
-    return dt_local
+    safe_text = json.dumps(text_to_copy)
+    html = f"""
+    <div>
+      <button id="btn_{key}" style="
+          padding: 0.42rem 0.85rem;
+          border-radius: 0.55rem;
+          border: 1px solid #D0D0D0;
+          background: white;
+          cursor: pointer;
+          font-size: 0.95rem;
+      ">{label}</button>
+    </div>
+
+    <script>
+      const btn = document.getElementById("btn_{key}");
+      const original = btn.innerText;
+
+      btn.addEventListener("click", async () => {{
+        try {{
+          await navigator.clipboard.writeText({safe_text});
+          btn.innerText = "Скопировано ✓";
+          btn.style.borderColor = "#4CAF50";
+          btn.style.background = "#F2FFF5";
+          setTimeout(() => {{
+            btn.innerText = original;
+            btn.style.borderColor = "#D0D0D0";
+            btn.style.background = "white";
+          }}, 900);
+        }} catch (e) {{
+          btn.innerText = "Не удалось :(";
+          btn.style.borderColor = "#F44336";
+          btn.style.background = "#FFF2F2";
+          setTimeout(() => {{
+            btn.innerText = original;
+            btn.style.borderColor = "#D0D0D0";
+            btn.style.background = "white";
+          }}, 1200);
+        }}
+      }});
+    </script>
+    """
+    components.html(html, height=54)
 
 
-def top_settings_block(tab_key: str):
+def to_unix(dt_utc: datetime, unit: str) -> int:
+    ts = int(dt_utc.timestamp())
+    return ts if unit == "s" else ts * 1000
+
+
+def from_unix(ts: int, unit: str) -> datetime:
+    if unit == "ms":
+        ts = ts / 1000
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
+def replace_placeholders(text: str, ph_start: str, ph_end: str, start_ts: int, end_ts: int) -> str:
+    return text.replace(ph_start, str(start_ts)).replace(ph_end, str(end_ts))
+
+
+def find_timestamps(text: str, min_len: int = 10) -> list[int]:
+    pattern = r"(?<!\d)(\d{" + str(min_len) + r",})(?!\d)"
+    return [int(m.group(1)) for m in re.finditer(pattern, text)]
+
+
+def guess_unit(ts: int) -> str:
+    # простая эвристика по длине
+    digits = len(str(abs(ts)))
+    return "ms" if digits >= 13 else "s"
+
+
+def fmt_dt(dt_utc: datetime, tz: ZoneInfo) -> str:
+    local_dt = dt_utc.astimezone(tz)
+    return local_dt.strftime("%Y-%m-%d %H:%M:%S") + f" ({tz.key})"
+
+
+def compact_settings(tab_key: str):
     """
-    Настройки в самом верху вкладки:
-      - unit (s/ms)
-      - timezone
+    Компактная строка: unit + timezone.
+    Лейблы скрыты, чтобы не раздувать UI.
     """
     c1, c2 = st.columns([1, 2])
     with c1:
         unit = st.radio(
-            "Единицы timestamp",
+            "unit",
             ["s", "ms"],
             horizontal=True,
             key=f"{tab_key}_unit",
+            label_visibility="collapsed",
         )
     with c2:
         tz_name = st.selectbox(
-            "Таймзона (для ввода дат и отображения расшифровки)",
+            "timezone",
             options=["UTC", "Asia/Yerevan", "Europe/Moscow", "Europe/London", "America/Los_Angeles"],
             index=1,
             key=f"{tab_key}_tz",
+            label_visibility="collapsed",
         )
+    # маленькие подписи вместо заголовков
+    hint_c1, hint_c2 = st.columns([1, 2])
+    with hint_c1:
+        st.caption("Единицы")
+    with hint_c2:
+        st.caption("Таймзона")
     return unit, ZoneInfo(tz_name)
+
+
+def time_pair_controls(prefix: str, tz: ZoneInfo):
+    """
+    Минимальный ввод времени: дата + одно поле time_input (пикер + ручной ввод).
+    """
+    c1, c2 = st.columns(2)
+    with c1:
+        sd = st.date_input("Дата старта", key=f"{prefix}_sd")
+        stime = st.time_input("Время старта", value=time(0, 0), key=f"{prefix}_st")
+    with c2:
+        ed = st.date_input("Дата финиша", key=f"{prefix}_ed")
+        etime = st.time_input("Время финиша", value=time(23, 59), key=f"{prefix}_et")
+
+    start_local = datetime.combine(sd, stime).replace(tzinfo=tz)
+    end_local = datetime.combine(ed, etime).replace(tzinfo=tz)
+    return start_local, end_local
+
+
+def validate_json(text: str):
+    """
+    Возвращает:
+      (ok: bool, data_or_err: object/str, pretty: str|None, minified: str|None)
+    """
+    try:
+        data = json.loads(text)
+        pretty = json.dumps(data, ensure_ascii=False, indent=2)
+        minified = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        return True, data, pretty, minified
+    except json.JSONDecodeError as e:
+        # e.lineno / e.colno
+        return False, f"{e.msg} (строка {e.lineno}, колонка {e.colno})", None, None
+    except Exception as e:
+        return False, str(e), None, None
 
 
 # -------------------- App --------------------
 
 st.set_page_config(page_title="GD Multitool", page_icon="🛠", layout="wide")
-st.title("🛠 GD Multitool — Подстановка и расшифровка времени в JSON/тексте")
 
-tabs = st.tabs(["🧩 Подстановка timestamps", "🔎 Расшифровка timestamps"])
+tabs = st.tabs(["🧩 Подстановка", "🔎 Расшифровка"])
 
 
-# -------------------- TAB 1: Replace --------------------
+# -------------------- Tab: Replace --------------------
 with tabs[0]:
-    st.subheader("Подстановка времени в текст/JSON по плейсхолдерам")
+    unit, tz = compact_settings("rep")
 
-    # settings at top
-    unit, tz = top_settings_block("replace")
+    left, right = st.columns([1, 1])
 
-    st.markdown("### Время")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Старт**")
-        start_dt_local = time_controls_block("replace_start", tz)
-    with c2:
-        st.markdown("**Завершение**")
-        end_dt_local = time_controls_block("replace_end", tz)
+    with left:
+        start_local, end_local = time_pair_controls("rep_time", tz)
 
-    if end_dt_local < start_dt_local:
-        st.warning("Финиш раньше старта — проверь даты/время.")
+        if end_local < start_local:
+            st.warning("Финиш раньше старта.")
 
-    start_ts = to_unix(start_dt_local.astimezone(timezone.utc), unit)
-    end_ts = to_unix(end_dt_local.astimezone(timezone.utc), unit)
+        start_ts = to_unix(start_local.astimezone(timezone.utc), unit)
+        end_ts = to_unix(end_local.astimezone(timezone.utc), unit)
 
-    st.caption(f"Start: `{start_ts}`  |  End: `{end_ts}`")
+        st.caption(f"Start: `{start_ts}`  |  End: `{end_ts}`")
 
-    st.markdown("### Текст / JSON")
-    source_text = st.text_area("Исходный текст", value=DEFAULT_TEXT, height=280)
+        src = st.text_area("Текст / JSON", value=DEFAULT_TEXT, height=280, key="rep_src")
 
-    p1, p2 = st.columns(2)
-    with p1:
-        ph_start = st.text_input("Плейсхолдер старта", value="ВРЕМЯ СТАРТА")
-    with p2:
-        ph_end = st.text_input("Плейсхолдер завершения", value="ВРЕМЯ ЗАВЕРШЕНИЯ")
+        p1, p2 = st.columns(2)
+        with p1:
+            ph_start = st.text_input("Плейсхолдер старта", value="ВРЕМЯ СТАРТА", key="rep_phs")
+        with p2:
+            ph_end = st.text_input("Плейсхолдер финиша", value="ВРЕМЯ ЗАВЕРШЕНИЯ", key="rep_phe")
 
-    if st.button("Подставить", type="primary", key="do_replace"):
-        result = replace_placeholders(source_text, ph_start, ph_end, start_ts, end_ts)
+        if st.button("Подставить", type="primary", key="rep_btn"):
+            st.session_state["rep_result"] = replace_placeholders(
+                src, ph_start, ph_end, start_ts, end_ts
+            )
 
-        st.markdown("### Результат")
-        st.text_area(" ", value=result, height=280, disabled=True)
-        copy_button("Скопировать результат", result, key="copy_replace_result")
+    with right:
+        result = st.session_state.get("rep_result", "")
+        st.text_area("Результат", value=result, height=280, disabled=True, key="rep_out")
+
+        if result:
+            copy_button_responsive("Скопировать", result, key="copy_rep")
+
+            ok, info, pretty, minified = validate_json(result)
+            if ok:
+                st.success("JSON валиден")
+                view_mode = st.radio(
+                    "Вид",
+                    ["Pretty", "Minified"],
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key="rep_json_view",
+                )
+                if view_mode == "Pretty":
+                    st.code(pretty, language="json")
+                    copy_button_responsive("Скопировать pretty", pretty, key="copy_rep_pretty")
+                else:
+                    st.code(minified, language="json")
+                    copy_button_responsive("Скопировать minified", minified, key="copy_rep_minified")
+            else:
+                st.error(f"JSON невалиден: {info}")
 
 
-# -------------------- TAB 2: Decode --------------------
+# -------------------- Tab: Decode --------------------
 with tabs[1]:
-    st.subheader("Расшифровка timestamps из текста/JSON → человекочитаемые даты")
+    _, tz = compact_settings("dec")
 
-    # settings at top
-    unit_hint, tz = top_settings_block("decode")
-    st.caption("Расшифровка использует авто-определение (s/ms) по длине числа, но можно сверяться с выбранными единицами выше.")
+    left, right = st.columns([1, 1])
 
-    st.markdown("### Текст / JSON")
-    source_text = st.text_area("Вставь текст для расшифровки", value=DEFAULT_TEXT, height=320)
+    with left:
+        src = st.text_area("Текст / JSON", value=DEFAULT_TEXT, height=340, key="dec_src")
+        if st.button("Найти timestamps", type="primary", key="dec_btn"):
+            found = find_timestamps(src, min_len=10)
 
-    if st.button("Найти и расшифровать timestamps", type="primary", key="do_decode"):
-        found = find_timestamps(source_text, min_len=10)
-
-        if not found:
-            st.info("Не нашёл чисел, похожих на timestamp (10+ цифр).")
-        else:
             rows = []
-            for ts in found[:300]:
+            for ts in found[:400]:
                 guessed = guess_unit(ts)
                 dt_utc = from_unix(ts, unit=guessed)
                 rows.append((ts, guessed, fmt_dt(dt_utc, tz)))
 
-            st.markdown("### Найденные timestamps")
+            st.session_state["dec_rows"] = rows
+
+    with right:
+        rows = st.session_state.get("dec_rows", [])
+        if not rows:
+            st.info("Здесь появится таблица после поиска.")
+        else:
             st.dataframe(
                 rows,
                 use_container_width=True,
                 column_config={
                     0: st.column_config.NumberColumn("Timestamp"),
-                    1: st.column_config.TextColumn("Guess (s/ms)"),
+                    1: st.column_config.TextColumn("s/ms"),
                     2: st.column_config.TextColumn("Дата"),
                 },
             )
-
-            summary = "\n".join([f"{ts} [{g}] -> {d}" for ts, g, d in rows])
-            st.markdown("### Сводка")
-            st.text_area("  ", value=summary, height=180, disabled=True)
-            copy_button("Скопировать сводку", summary, key="copy_decode_summary")
