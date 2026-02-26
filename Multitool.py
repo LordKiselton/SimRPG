@@ -92,7 +92,6 @@ def guess_unit(ts: int) -> str:
 
 
 def fmt_dt(dt_aware: datetime, tz: ZoneInfo) -> str:
-    # dt_aware is tz-aware
     local_dt = dt_aware.astimezone(tz)
     return local_dt.strftime("%Y-%m-%d %H:%M:%S") + f" ({tz.key})"
 
@@ -102,14 +101,27 @@ def fmt_utc(dt_aware: datetime) -> str:
     return dt_utc.strftime("%Y-%m-%d %H:%M:%S") + " (UTC)"
 
 
+def validate_json(text: str):
+    """(ok, info, pretty, minified)"""
+    try:
+        data = json.loads(text)
+        pretty = json.dumps(data, ensure_ascii=False, indent=2)
+        minified = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        return True, "OK", pretty, minified
+    except json.JSONDecodeError as e:
+        return False, f"{e.msg} (строка {e.lineno}, колонка {e.colno})", None, None
+    except Exception as e:
+        return False, str(e), None, None
+
+
 def compact_settings(tab_key: str):
     """
     Компактные настройки СВЕРХУ:
-      - timezone слева (по умолчанию UTC)
+      - timezone слева (default UTC)
       - unit справа
+    Подписи под ними убраны (как просил).
     """
     c1, c2 = st.columns([2, 1])
-
     with c1:
         tz_name = st.selectbox(
             "timezone",
@@ -126,13 +138,6 @@ def compact_settings(tab_key: str):
             key=f"{tab_key}_unit",
             label_visibility="collapsed",
         )
-
-    hc1, hc2 = st.columns([2, 1])
-    with hc1:
-        st.caption("Таймзона")
-    with hc2:
-        st.caption("Единицы")
-
     return unit, ZoneInfo(tz_name)
 
 
@@ -154,25 +159,25 @@ def time_pair_controls(prefix: str, tz: ZoneInfo):
     return start_local, end_local
 
 
-def validate_json(text: str):
-    """(ok, info, pretty, minified)"""
-    try:
-        data = json.loads(text)
-        pretty = json.dumps(data, ensure_ascii=False, indent=2)
-        minified = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        return True, "OK", pretty, minified
-    except json.JSONDecodeError as e:
-        return False, f"{e.msg} (строка {e.lineno}, колонка {e.colno})", None, None
-    except Exception as e:
-        return False, str(e), None, None
-
-
 # -------------------- App --------------------
 
 st.set_page_config(page_title="GD Multitool", page_icon="🛠", layout="wide")
 st.title("🛠 GD Multitool")
 
-tabs = st.tabs(["🧩 Подстановка", "🔎 Расшифровка"])
+# CSS: делаем селект таймзоны заметно уже (и в целом настройку компактнее)
+st.markdown(
+    """
+    <style>
+      /* Сужаем selectbox (таймзону) примерно в ~4 раза относительно широких контейнеров */
+      div[data-testid="stSelectbox"] { max-width: 240px; }
+      /* Немного компактнее радиокнопки для s/ms */
+      div[data-testid="stRadio"] { max-width: 140px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+tabs = st.tabs(["🧩 Подстановка UNIX", "🔎 Расшифровка UNIX"])
 
 
 # -------------------- Tab: Replace --------------------
@@ -201,9 +206,7 @@ with tabs[0]:
             ph_end = st.text_input("Плейсхолдер финиша", value="ВРЕМЯ ЗАВЕРШЕНИЯ", key="rep_phe")
 
         if st.button("Подставить", type="primary", key="rep_btn"):
-            st.session_state["rep_result"] = replace_placeholders(
-                src, ph_start, ph_end, start_ts, end_ts
-            )
+            st.session_state["rep_result"] = replace_placeholders(src, ph_start, ph_end, start_ts, end_ts)
 
     with right:
         result = st.session_state.get("rep_result", "")
@@ -228,7 +231,6 @@ with tabs[0]:
                 else:
                     st.code(minified, language="json")
                     copy_button_responsive("Скопировать minified", minified, key="copy_rep_minified")
-
             else:
                 st.error(f"JSON невалиден: {info}")
                 st.code(result, language="text")
@@ -250,12 +252,12 @@ with tabs[1]:
             rows = []
             for ts in found[:400]:
                 guessed = guess_unit(ts)
-                dt_utc = from_unix(ts, unit=guessed)  # tz-aware UTC
+                dt_utc = from_unix(ts, unit=guessed)  # tz-aware UTC datetime
                 rows.append((
                     ts,
                     guessed,
-                    fmt_dt(dt_utc, tz),
-                    fmt_utc(dt_utc),
+                    fmt_dt(dt_utc, tz),   # в выбранной TZ
+                    fmt_utc(dt_utc),      # GMT+0 / UTC
                 ))
 
             st.session_state["dec_rows"] = rows
@@ -265,6 +267,7 @@ with tabs[1]:
         if not rows:
             st.info("Здесь появится таблица после поиска.")
         else:
+            # Проверено: rows имеет 4 колонки, и column_config соответствует индексам 0..3
             st.dataframe(
                 rows,
                 use_container_width=True,
