@@ -91,15 +91,34 @@ def guess_unit(ts: int) -> str:
     return "ms" if digits >= 13 else "s"
 
 
-def fmt_dt(dt_utc: datetime, tz: ZoneInfo) -> str:
-    local_dt = dt_utc.astimezone(tz)
+def fmt_dt(dt_aware: datetime, tz: ZoneInfo) -> str:
+    # dt_aware is tz-aware
+    local_dt = dt_aware.astimezone(tz)
     return local_dt.strftime("%Y-%m-%d %H:%M:%S") + f" ({tz.key})"
 
 
+def fmt_utc(dt_aware: datetime) -> str:
+    dt_utc = dt_aware.astimezone(timezone.utc)
+    return dt_utc.strftime("%Y-%m-%d %H:%M:%S") + " (UTC)"
+
+
 def compact_settings(tab_key: str):
-    """Компактная строка настроек: unit + timezone (без жирных заголовков)."""
-    c1, c2 = st.columns([1, 2])
+    """
+    Компактные настройки СВЕРХУ:
+      - timezone слева (по умолчанию UTC)
+      - unit справа
+    """
+    c1, c2 = st.columns([2, 1])
+
     with c1:
+        tz_name = st.selectbox(
+            "timezone",
+            options=["UTC", "Asia/Yerevan", "Europe/Moscow", "Europe/London", "America/Los_Angeles"],
+            index=0,  # UTC default
+            key=f"{tab_key}_tz",
+            label_visibility="collapsed",
+        )
+    with c2:
         unit = st.radio(
             "unit",
             ["s", "ms"],
@@ -107,27 +126,21 @@ def compact_settings(tab_key: str):
             key=f"{tab_key}_unit",
             label_visibility="collapsed",
         )
-    with c2:
-        tz_name = st.selectbox(
-            "timezone",
-            options=["UTC", "Asia/Yerevan", "Europe/Moscow", "Europe/London", "America/Los_Angeles"],
-            index=1,
-            key=f"{tab_key}_tz",
-            label_visibility="collapsed",
-        )
 
-    # короткие подписи (без заголовков)
-    hc1, hc2 = st.columns([1, 2])
+    hc1, hc2 = st.columns([2, 1])
     with hc1:
-        st.caption("Единицы")
-    with hc2:
         st.caption("Таймзона")
+    with hc2:
+        st.caption("Единицы")
 
     return unit, ZoneInfo(tz_name)
 
 
 def time_pair_controls(prefix: str, tz: ZoneInfo):
-    """Минимальный ввод времени: дата + одно поле time_input (пикер + ручной ввод)."""
+    """
+    Минимальный ввод времени: дата + одно поле time_input (пикер + ручной ввод).
+    Ввод трактуем как время в выбранной таймзоне.
+    """
     c1, c2 = st.columns(2)
     with c1:
         sd = st.date_input("Дата старта", key=f"{prefix}_sd")
@@ -157,6 +170,7 @@ def validate_json(text: str):
 # -------------------- App --------------------
 
 st.set_page_config(page_title="GD Multitool", page_icon="🛠", layout="wide")
+st.title("🛠 GD Multitool")
 
 tabs = st.tabs(["🧩 Подстановка", "🔎 Расшифровка"])
 
@@ -164,7 +178,7 @@ tabs = st.tabs(["🧩 Подстановка", "🔎 Расшифровка"])
 # -------------------- Tab: Replace --------------------
 with tabs[0]:
     unit, tz = compact_settings("rep")
-    st.divider()  # отделяем настройки от основного контента
+    st.divider()
 
     left, right = st.columns([1, 1])
 
@@ -224,7 +238,7 @@ with tabs[0]:
 # -------------------- Tab: Decode --------------------
 with tabs[1]:
     _, tz = compact_settings("dec")
-    st.divider()  # отделяем настройки от основного контента
+    st.divider()
 
     left, right = st.columns([1, 1])
 
@@ -236,8 +250,13 @@ with tabs[1]:
             rows = []
             for ts in found[:400]:
                 guessed = guess_unit(ts)
-                dt_utc = from_unix(ts, unit=guessed)
-                rows.append((ts, guessed, fmt_dt(dt_utc, tz)))
+                dt_utc = from_unix(ts, unit=guessed)  # tz-aware UTC
+                rows.append((
+                    ts,
+                    guessed,
+                    fmt_dt(dt_utc, tz),
+                    fmt_utc(dt_utc),
+                ))
 
             st.session_state["dec_rows"] = rows
 
@@ -252,6 +271,7 @@ with tabs[1]:
                 column_config={
                     0: st.column_config.NumberColumn("Timestamp"),
                     1: st.column_config.TextColumn("s/ms"),
-                    2: st.column_config.TextColumn("Дата"),
+                    2: st.column_config.TextColumn("В выбранной TZ"),
+                    3: st.column_config.TextColumn("GMT+0"),
                 },
             )
