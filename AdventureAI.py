@@ -105,11 +105,12 @@ def generate_scene(hero, previous_choice=None):
     system_prompt = """
 Ты — мастер подземелий.
 Строгие правила:
-- Без случайных изменений статов.
-- Эффекты только как следствие событий.
 - 120–160 слов.
 - 2–3 варианта действий.
 - Строго JSON.
+- Урон не более 20% от текущего HP героя.
+- Смерть возможна только после 4-го хода.
+- Без случайных изменений статов.
 """
 
     user_prompt = f"""
@@ -142,6 +143,7 @@ HP: {hero.get('hp')}
         if "scene_text" not in parsed or "choices" not in parsed:
             return None
 
+        parsed.setdefault("effects", {})
         return parsed
 
     except:
@@ -164,6 +166,7 @@ names = list(hero_map.keys())
 names.append("➕ Создать героя")
 
 selected = st.selectbox("Выберите героя", names)
+
 
 # ===================================
 # CREATE HERO
@@ -191,7 +194,7 @@ if selected == "➕ Создать героя":
                 "name": name,
                 "class": hero_class,
                 "stats": stats,
-                "hp": stats["constitution"] * 5,
+                "hp": stats["constitution"] * 8 + 20,
             }
 
             hero = migrate_hero(hero)
@@ -202,8 +205,9 @@ if selected == "➕ Создать героя":
 
     st.stop()
 
+
 # ===================================
-# LOAD HERO SAFE
+# LOAD HERO
 # ===================================
 
 if selected not in hero_map:
@@ -219,6 +223,7 @@ if not hero:
 hero = migrate_hero(hero)
 save_hero(hero)
 
+
 # ===================================
 # DELETE HERO
 # ===================================
@@ -229,46 +234,80 @@ if st.sidebar.button("🗑 Удалить героя"):
     st.session_state.active_hero_id = None
     st.rerun()
 
+
 # ===================================
 # SIDEBAR
 # ===================================
 
 st.sidebar.header(hero.get("name"))
 st.sidebar.write(f"HP: {hero.get('hp')}")
+st.sidebar.write(f"Ход: {hero.get('turn_count')}")
+
 
 # ===================================
 # GENERATE SCENE SAFE
 # ===================================
 
 if hero.get("current_scene") is None:
-    hero["current_scene"] = generate_scene(hero)
+    scene_data = generate_scene(hero)
+    if not scene_data:
+        st.error("Ошибка генерации сцены")
+        st.stop()
+
+    hero["current_scene"] = scene_data
     hero["effects_applied"] = False
     save_hero(hero)
 
 scene = hero.get("current_scene")
 
 if not scene:
-    st.error("Ошибка генерации сцены")
+    st.error("Ошибка сцены")
     st.stop()
+
 
 st.markdown("### Сцена")
 st.write(scene.get("scene_text"))
 
+
 # ===================================
-# APPLY EFFECTS SAFE
+# APPLY EFFECTS (BALANCED)
 # ===================================
 
 if not hero.get("effects_applied"):
 
     effects = scene.get("effects", {})
+    hp_change = effects.get("hp", 0)
 
-    hero["hp"] = clamp(hero.get("hp", 0) + effects.get("hp", 0), 0, 200)
+    # Ограничение максимального урона
+    max_damage = max(5, hero["stats"]["constitution"] * 2)
+
+    if hp_change < 0:
+        hp_change = max(hp_change, -max_damage)
+
+    # Нельзя умереть в первые 3 хода
+    if hero["turn_count"] < 3:
+        if hero["hp"] + hp_change <= 0:
+            hp_change = -(hero["hp"] - 1)
+
+    hero["hp"] = clamp(hero["hp"] + hp_change, 0, 300)
 
     hero["turn_count"] += 1
     hero["history"].append(scene.get("scene_text", ""))
 
     hero["effects_applied"] = True
     save_hero(hero)
+
+    # Проверка смерти
+    if hero["hp"] <= 0:
+        hero["is_alive"] = False
+        hero["current_scene"] = {
+            "scene_text": "Вы пали. Ваше приключение окончено.",
+            "choices": []
+        }
+        save_hero(hero)
+        st.error("Герой погиб.")
+        st.stop()
+
 
 # ===================================
 # CHOICES
@@ -280,7 +319,13 @@ for choice in scene.get("choices", []):
 
     if st.button(choice.get("text"), key=key):
         hero["history"].append(f"Выбор: {choice.get('text')}")
-        hero["current_scene"] = generate_scene(hero, choice.get("text"))
+
+        new_scene = generate_scene(hero, choice.get("text"))
+        if not new_scene:
+            st.error("Ошибка генерации следующей сцены")
+            st.stop()
+
+        hero["current_scene"] = new_scene
         hero["effects_applied"] = False
         save_hero(hero)
         st.rerun()
