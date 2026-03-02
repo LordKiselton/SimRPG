@@ -6,18 +6,15 @@ import uuid
 import re
 from openai import OpenAI
 
-# ===================================
-# CONFIG
-# ===================================
-
 MODEL = "gpt-4o-mini"
 client = OpenAI()
 
 SAVE_DIR = "saves"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
+
 # ===================================
-# UTILS
+# SAFE UTILS
 # ===================================
 
 def clamp(value, min_v, max_v):
@@ -31,7 +28,6 @@ def safe_json_parse(text):
         return json.loads(text)
     except:
         pass
-
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
@@ -41,23 +37,42 @@ def safe_json_parse(text):
     return None
 
 
+def get_hero_path(hero_id):
+    return os.path.join(SAVE_DIR, f"{hero_id}.json")
+
+
+def load_hero_by_id(hero_id):
+    path = get_hero_path(hero_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return None
+
+
 def save_hero(hero):
-    path = os.path.join(SAVE_DIR, f"{hero['hero_id']}.json")
-    with open(path, "w", encoding="utf-8") as f:
+    if not hero or "hero_id" not in hero:
+        return
+    with open(get_hero_path(hero["hero_id"]), "w", encoding="utf-8") as f:
         json.dump(hero, f, ensure_ascii=False, indent=2)
 
 
-def load_heroes():
+def load_all_heroes():
     heroes = []
     for file in os.listdir(SAVE_DIR):
         if file.endswith(".json"):
-            with open(os.path.join(SAVE_DIR, file), "r", encoding="utf-8") as f:
-                heroes.append(json.load(f))
+            try:
+                with open(os.path.join(SAVE_DIR, file), "r", encoding="utf-8") as f:
+                    heroes.append(json.load(f))
+            except:
+                pass
     return heroes
 
 
 def delete_hero(hero_id):
-    path = os.path.join(SAVE_DIR, f"{hero_id}.json")
+    path = get_hero_path(hero_id)
     if os.path.exists(path):
         os.remove(path)
 
@@ -74,8 +89,10 @@ def migrate_hero(hero):
         "inventory": [],
         "location": "Неизвестно"
     }
-    for key, value in defaults.items():
-        hero.setdefault(key, value)
+
+    for k, v in defaults.items():
+        hero.setdefault(k, v)
+
     return hero
 
 
@@ -86,26 +103,23 @@ def migrate_hero(hero):
 def generate_scene(hero, previous_choice=None):
 
     system_prompt = """
-Ты — мастер подземелий в стиле Baldur’s Gate 3.
-
-СТРОГИЕ ПРАВИЛА:
-- Мир полностью последовательный.
-- Никаких случайных изменений характеристик.
-- Эффекты ТОЛЬКО как следствие описанных событий.
-- Если нет боя/награды — эффекты = 0.
+Ты — мастер подземелий.
+Строгие правила:
+- Без случайных изменений статов.
+- Эффекты только как следствие событий.
 - 120–160 слов.
 - 2–3 варианта действий.
 - Строго JSON.
 """
 
     user_prompt = f"""
-Имя: {hero['name']}
-Класс: {hero['class']}
-HP: {hero['hp']}
-Статы: {hero['stats']}
-Инвентарь: {hero['inventory']}
-Локация: {hero['location']}
-Последние события: {hero['history'][-5:]}
+Имя: {hero.get('name')}
+Класс: {hero.get('class')}
+HP: {hero.get('hp')}
+Статы: {hero.get('stats')}
+Инвентарь: {hero.get('inventory')}
+Локация: {hero.get('location')}
+История: {hero.get('history')[-5:]}
 Предыдущий выбор: {previous_choice}
 """
 
@@ -135,37 +149,34 @@ HP: {hero['hp']}
 
 
 # ===================================
-# SESSION STATE INIT
+# SESSION INIT
 # ===================================
 
 if "active_hero_id" not in st.session_state:
     st.session_state.active_hero_id = None
 
-heroes = load_heroes()
-alive_heroes = [h for h in heroes if h.get("is_alive", True)]
+heroes = load_all_heroes()
+alive = [h for h in heroes if h.get("is_alive", True)]
 
-hero_dict = {h["name"]: h for h in alive_heroes}
-hero_names = list(hero_dict.keys())
+hero_map = {h.get("name"): h.get("hero_id") for h in alive if "hero_id" in h}
 
-if not hero_names:
-    hero_names = []
+names = list(hero_map.keys())
+names.append("➕ Создать героя")
 
-hero_names.append("➕ Создать нового героя")
-
-selected = st.selectbox("Выберите героя", hero_names)
+selected = st.selectbox("Выберите героя", names)
 
 # ===================================
 # CREATE HERO
 # ===================================
 
-if selected == "➕ Создать нового героя":
+if selected == "➕ Создать героя":
 
-    with st.form("create_hero"):
-        name = st.text_input("Имя героя")
+    with st.form("create"):
+        name = st.text_input("Имя")
         hero_class = st.selectbox("Класс", ["Воин", "Маг", "Вор"])
-        submitted = st.form_submit_button("Создать")
+        ok = st.form_submit_button("Создать")
 
-        if submitted and name:
+        if ok and name:
 
             stats = {
                 "strength": random.randint(8, 15),
@@ -181,18 +192,11 @@ if selected == "➕ Создать нового героя":
                 "class": hero_class,
                 "stats": stats,
                 "hp": stats["constitution"] * 5,
-                "inventory": [],
-                "location": "Таверна у дороги",
-                "known_npcs": [],
-                "active_threads": [],
-                "history": [],
-                "turn_count": 0,
-                "is_alive": True,
-                "current_scene": None,
-                "effects_applied": False
             }
 
+            hero = migrate_hero(hero)
             save_hero(hero)
+
             st.session_state.active_hero_id = hero["hero_id"]
             st.rerun()
 
@@ -202,11 +206,17 @@ if selected == "➕ Создать нового героя":
 # LOAD HERO SAFE
 # ===================================
 
-if selected not in hero_dict:
+if selected not in hero_map:
     st.stop()
 
-hero = migrate_hero(hero_dict[selected])
-st.session_state.active_hero_id = hero["hero_id"]
+hero_id = hero_map[selected]
+hero = load_hero_by_id(hero_id)
+
+if not hero:
+    st.error("Ошибка загрузки героя")
+    st.stop()
+
+hero = migrate_hero(hero)
 save_hero(hero)
 
 # ===================================
@@ -215,7 +225,7 @@ save_hero(hero)
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🗑 Удалить героя"):
-    delete_hero(hero["hero_id"])
+    delete_hero(hero_id)
     st.session_state.active_hero_id = None
     st.rerun()
 
@@ -223,17 +233,8 @@ if st.sidebar.button("🗑 Удалить героя"):
 # SIDEBAR
 # ===================================
 
-st.sidebar.header(hero["name"])
-st.sidebar.write(f"Класс: {hero['class']}")
-st.sidebar.write(f"HP: {hero['hp']}")
-st.sidebar.write(f"Локация: {hero['location']}")
-
-st.sidebar.subheader("Статы")
-for s, v in hero["stats"].items():
-    st.sidebar.write(f"{s.capitalize()}: {v}")
-
-st.sidebar.subheader("Инвентарь")
-st.sidebar.write(hero["inventory"] if hero["inventory"] else "Пусто")
+st.sidebar.header(hero.get("name"))
+st.sidebar.write(f"HP: {hero.get('hp')}")
 
 # ===================================
 # GENERATE SCENE SAFE
@@ -247,50 +248,24 @@ if hero.get("current_scene") is None:
 scene = hero.get("current_scene")
 
 if not scene:
-    st.error("Ошибка генерации сцены. Попробуйте обновить.")
+    st.error("Ошибка генерации сцены")
     st.stop()
 
-# ===================================
-# DISPLAY SCENE
-# ===================================
-
 st.markdown("### Сцена")
-st.write(scene.get("scene_text", ""))
+st.write(scene.get("scene_text"))
 
 # ===================================
-# APPLY EFFECTS
+# APPLY EFFECTS SAFE
 # ===================================
 
-if not hero["effects_applied"]:
+if not hero.get("effects_applied"):
 
     effects = scene.get("effects", {})
 
-    hero["hp"] = clamp(hero["hp"] + effects.get("hp", 0), 0, 200)
-
-    for stat in hero["stats"]:
-        hero["stats"][stat] = clamp(
-            hero["stats"][stat] + effects.get(stat, 0),
-            1,
-            20
-        )
-
-    if effects.get("add_item"):
-        hero["inventory"].append(effects["add_item"])
-
-    if effects.get("remove_item") in hero["inventory"]:
-        hero["inventory"].remove(effects["remove_item"])
-
-    if effects.get("new_location"):
-        hero["location"] = effects["new_location"]
+    hero["hp"] = clamp(hero.get("hp", 0) + effects.get("hp", 0), 0, 200)
 
     hero["turn_count"] += 1
     hero["history"].append(scene.get("scene_text", ""))
-
-    if hero["hp"] <= 0:
-        hero["is_alive"] = False
-        save_hero(hero)
-        st.error("Персонаж погиб.")
-        st.stop()
 
     hero["effects_applied"] = True
     save_hero(hero)
@@ -299,16 +274,13 @@ if not hero["effects_applied"]:
 # CHOICES
 # ===================================
 
-st.markdown("### Ваш выбор")
+for choice in scene.get("choices", []):
 
-choices = scene.get("choices", [])
+    key = f"{hero_id}_{hero.get('turn_count')}_{choice.get('id')}"
 
-for choice in choices:
-    key = f"{hero['hero_id']}_{hero['turn_count']}_{choice.get('id')}"
-
-    if st.button(choice.get("text", "Выбрать"), key=key):
-        hero["history"].append(f"Игрок выбрал: {choice.get('text')}")
-        hero["current_scene"] = generate_scene(hero, previous_choice=choice.get("text"))
+    if st.button(choice.get("text"), key=key):
+        hero["history"].append(f"Выбор: {choice.get('text')}")
+        hero["current_scene"] = generate_scene(hero, choice.get("text"))
         hero["effects_applied"] = False
         save_hero(hero)
         st.rerun()
