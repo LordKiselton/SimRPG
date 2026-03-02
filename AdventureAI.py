@@ -3,6 +3,7 @@ import json
 import random
 import os
 import uuid
+import re
 from openai import OpenAI
 
 # ===================================
@@ -22,16 +23,37 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 def clamp(value, min_v, max_v):
     return max(min_v, min(value, max_v))
 
+
 def safe_json_parse(text):
+    if not text:
+        return None
+
     try:
         return json.loads(text)
-    except Exception:
-        return None
+    except:
+        pass
+
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except:
+            return None
+
+    return None
+
 
 def save_hero(hero):
     path = os.path.join(SAVE_DIR, f"{hero['hero_id']}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(hero, f, ensure_ascii=False, indent=2)
+
+
+def delete_hero(hero_id):
+    path = os.path.join(SAVE_DIR, f"{hero_id}.json")
+    if os.path.exists(path):
+        os.remove(path)
+
 
 def load_heroes():
     heroes = []
@@ -41,8 +63,8 @@ def load_heroes():
                 heroes.append(json.load(f))
     return heroes
 
+
 def migrate_hero(hero):
-    """Добавляет недостающие поля в старых сохранениях"""
     defaults = {
         "current_scene": None,
         "effects_applied": False,
@@ -61,6 +83,7 @@ def migrate_hero(hero):
 
     return hero
 
+
 # ===================================
 # GENERATE SCENE
 # ===================================
@@ -69,38 +92,21 @@ def generate_scene(hero, previous_choice=None):
 
     system_prompt = """
 Ты — мастер подземелий в стиле Baldur’s Gate 3.
-Создавай логичную связную кампанию.
+Создавай логичную, причинно-следственную кампанию.
 
-Правила:
+СТРОГИЕ ПРАВИЛА:
+
 - Продолжай предыдущие события.
-- Мир последовательный.
-- Без повторов текста.
+- Мир полностью последовательный.
+- Никаких случайных изменений характеристик.
+- Эффекты ТОЛЬКО как следствие описанных событий.
+- Если нет явного события (бой, рана, награда) — все эффекты = 0.
+- Нельзя случайно менять статы.
 - Если HP <= 0 — опиши смерть.
 - 120–160 слов.
 - 2–3 варианта действий.
 
-Отвечай строго JSON:
-
-{
-  "scene_text": "...",
-  "effects": {
-    "hp": 0,
-    "strength": 0,
-    "dexterity": 0,
-    "intelligence": 0,
-    "constitution": 0,
-    "charisma": 0,
-    "add_item": null,
-    "remove_item": null,
-    "new_location": null,
-    "new_npc": null,
-    "new_thread": null
-  },
-  "choices": [
-    {"id": "a", "text": "..."},
-    {"id": "b", "text": "..."}
-  ]
-}
+Отвечай строго JSON без дополнительного текста.
 """
 
     user_prompt = f"""
@@ -112,7 +118,7 @@ HP: {hero.get('hp')}
 Локация: {hero.get('location')}
 NPC: {hero.get('known_npcs')}
 Активные линии: {hero.get('active_threads')}
-Последние события: {hero.get('history')[-3:]}
+Последние события: {hero.get('history')[-5:]}
 Предыдущий выбор: {previous_choice}
 """
 
@@ -123,15 +129,23 @@ NPC: {hero.get('known_npcs')}
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.8,
+            temperature=0.5,
             max_tokens=700
         )
 
         parsed = safe_json_parse(response.choices[0].message.content)
+
+        if not parsed:
+            return None
+
+        if "scene_text" not in parsed or "choices" not in parsed:
+            return None
+
         return parsed
 
     except Exception:
         return None
+
 
 # ===================================
 # SESSION INIT
@@ -207,6 +221,16 @@ hero = migrate_hero(hero)
 save_hero(hero)
 
 # ===================================
+# DELETE HERO
+# ===================================
+
+st.sidebar.markdown("---")
+if st.sidebar.button("Удалить героя"):
+    delete_hero(hero["hero_id"])
+    st.session_state.active_hero_id = None
+    st.rerun()
+
+# ===================================
 # SIDEBAR
 # ===================================
 
@@ -234,8 +258,11 @@ if hero.get("current_scene") is None:
 scene = hero.get("current_scene")
 
 if not scene:
-    st.error("Ошибка генерации сцены")
-    st.stop()
+    st.error("Ошибка генерации сцены. Перегенерация...")
+    hero["current_scene"] = generate_scene(hero)
+    hero["effects_applied"] = False
+    save_hero(hero)
+    st.rerun()
 
 # ===================================
 # DISPLAY SCENE
@@ -281,10 +308,12 @@ if not hero.get("effects_applied", False):
         hero["location"] = effects["new_location"]
 
     if effects.get("new_npc"):
-        hero["known_npcs"].append(effects["new_npc"])
+        if effects["new_npc"] not in hero["known_npcs"]:
+            hero["known_npcs"].append(effects["new_npc"])
 
     if effects.get("new_thread"):
-        hero["active_threads"].append(effects["new_thread"])
+        if effects["new_thread"] not in hero["active_threads"]:
+            hero["active_threads"].append(effects["new_thread"])
 
     hero["turn_count"] += 1
     hero["history"].append(scene.get("scene_text", ""))
@@ -309,9 +338,31 @@ if not hero.get("effects_applied", False):
 
 st.markdown("### Ваш выбор")
 
-for choice in scene.get("choices", []):
-    if st.button(choice.get("text", "Выбрать"), key=choice.get("id", str(uuid.uuid4()))):
+choices = scene.get("choices")
+
+if not choices or not isinstance(choices, list):
+    st.error("Сцена повреждена. Перегенерация...")
+    hero["current_scene"] = generate_scene(hero)
+    hero["effects_applied"] = False
+    save_hero(hero)
+    st.rerun()
+
+for choice in choices:
+    key = f"{hero['turn_count']}_{choice.get('id')}"
+
+    if st.button(choice.get("text", "Выбрать"), key=key):
+        hero["history"].append(f"Игрок выбрал: {choice.get('text')}")
         hero["current_scene"] = generate_scene(hero, previous_choice=choice.get("text"))
         hero["effects_applied"] = False
         save_hero(hero)
         st.rerun()
+
+# ===================================
+# FORCE REGEN BUTTON
+# ===================================
+
+if st.button("Перегенерировать сцену"):
+    hero["current_scene"] = generate_scene(hero)
+    hero["effects_applied"] = False
+    save_hero(hero)
+    st.rerun()
