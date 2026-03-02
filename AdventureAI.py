@@ -1,11 +1,17 @@
-import streamlit as st
+import os
 import json
-import random
+import streamlit as st
 from openai import OpenAI
 
+# ----------------------------
+# НАСТРОЙКИ
+# ----------------------------
+
+# Убедись, что ключ задан:
+# export OPENAI_API_KEY="..."
 client = OpenAI()
 
-MODEL = "gpt-4o-mini"  # можешь поменять
+MODEL = "gpt-4o-mini"  # можно поменять
 
 # ----------------------------
 # ИНИЦИАЛИЗАЦИЯ STATE
@@ -31,15 +37,40 @@ if "hero" not in st.session_state:
 # УТИЛИТЫ
 # ----------------------------
 
-def clamp(value, min_v, max_v):
+def clamp(value: int, min_v: int, max_v: int) -> int:
     return max(min_v, min(value, max_v))
 
 
-def safe_json_parse(text):
-    try:
-        return json.loads(text)
-    except:
+def safe_json_parse(text: str):
+    """
+    Иногда модель может вернуть JSON в ``` ``` или с пробелами.
+    Пытаемся аккуратно извлечь первый JSON-объект.
+    """
+    if not text:
         return None
+
+    t = text.strip()
+
+    # Убираем возможные code fences
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", t)
+        t = re.sub(r"\s*```$", "", t).strip()
+
+    # Пробуем как есть
+    try:
+        return json.loads(t)
+    except Exception:
+        pass
+
+    # Пытаемся найти первый {...}
+    m = re.search(r"\{.*\}", t, flags=re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return None
+
+    return None
 
 
 def get_recent_history():
@@ -51,7 +82,6 @@ def get_recent_history():
 # ----------------------------
 
 def generate_event():
-
     hero = st.session_state.hero
     history = get_recent_history()
 
@@ -92,17 +122,26 @@ HP: {hero['hp']}
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "system", "content": system_prompt.strip()},
+            {"role": "user", "content": user_prompt.strip()},
         ],
         temperature=0.9,
     )
 
     data = safe_json_parse(response.choices[0].message.content)
 
-    if not data or "event_text" not in data:
+    if not data or "event_text" not in data or "choices" not in data:
         return None
 
+    # Небольшая валидация choices
+    choices = []
+    for c in data.get("choices", []):
+        if isinstance(c, dict) and c.get("id") and c.get("text"):
+            choices.append({"id": str(c["id"])[:40], "text": str(c["text"])})
+    if len(choices) < 2:
+        return None
+
+    data["choices"] = choices[:4]
     return data
 
 
@@ -111,7 +150,6 @@ HP: {hero['hp']}
 # ----------------------------
 
 def generate_consequences(choice_id, choice_text):
-
     hero = st.session_state.hero
 
     system_prompt = """
@@ -158,15 +196,15 @@ ID: {choice_id}
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
+            {"role": "system", "content": system_prompt.strip()},
+            {"role": "user", "content": user_prompt.strip()},
         ],
         temperature=0.8,
     )
 
     data = safe_json_parse(response.choices[0].message.content)
 
-    if not data or "effects" not in data:
+    if not data or "effects" not in data or "result_text" not in data:
         return None
 
     return data
@@ -177,25 +215,37 @@ ID: {choice_id}
 # ----------------------------
 
 def apply_effects(data):
-
     hero = st.session_state.hero
-    effects = data["effects"]
+    effects = data.get("effects", {}) if isinstance(data, dict) else {}
 
-    hero["hp"] = clamp(hero["hp"] + effects["hp"], 0, 100)
-    hero["strength"] = clamp(hero["strength"] + effects["strength"], 1, 20)
-    hero["charisma"] = clamp(hero["charisma"] + effects["charisma"], 1, 20)
-    hero["gold"] = clamp(hero["gold"] + effects["gold"], 0, 999)
+    # Дефолты, чтобы не падать от KeyError
+    dhp = int(effects.get("hp", 0) or 0)
+    dstr = int(effects.get("strength", 0) or 0)
+    dcha = int(effects.get("charisma", 0) or 0)
+    dgold = int(effects.get("gold", 0) or 0)
+    add_item = effects.get("add_item", None)
+    remove_item = effects.get("remove_item", None)
 
-    if effects["add_item"]:
-        hero["inventory"].append(effects["add_item"])
+    hero["hp"] = clamp(hero["hp"] + dhp, 0, 100)
+    hero["strength"] = clamp(hero["strength"] + dstr, 1, 20)
+    hero["charisma"] = clamp(hero["charisma"] + dcha, 1, 20)
+    hero["gold"] = clamp(hero["gold"] + dgold, 0, 999)
 
-    if effects["remove_item"] and effects["remove_item"] in hero["inventory"]:
-        hero["inventory"].remove(effects["remove_item"])
+    if add_item:
+        hero["inventory"].append(str(add_item))
 
-st.session_state.history.append({
-        "event": st.session_state.current_event["event_text"],
-        "result": data["result_text"]
-    })
+    if remove_item:
+        ri = str(remove_item)
+        if ri in hero["inventory"]:
+            hero["inventory"].remove(ri)
+
+    # ЛОГ В ИСТОРИЮ (исправлена ошибка отступов и переменной data)
+    current = st.session_state.get("current_event")
+    if current and isinstance(current, dict) and current.get("event_text"):
+        st.session_state.history.append({
+            "event": current.get("event_text"),
+            "result": data.get("result_text", "")
+        })
 
     if hero["hp"] <= 0:
         st.session_state.game_over = True
@@ -220,6 +270,7 @@ if st.session_state.game_over:
     st.error("☠️ Ты погиб. Игра окончена.")
     if st.button("Начать заново"):
         init_game()
+        st.rerun()
     st.stop()
 
 # Генерация события
@@ -231,25 +282,37 @@ if not st.session_state.current_event:
 event = st.session_state.current_event
 
 if not event:
-    st.error("Ошибка генерации события")
+    st.error("Ошибка генерации события (модель вернула невалидный JSON). Попробуй обновить страницу.")
     st.stop()
 
 st.write("### 📜 Событие")
-st.write(event["event_text"])
+st.write(event.get("event_text", ""))
 
 st.write("### ⚔️ Выбери действие")
 
-for choice in event["choices"]:
-    if st.button(choice["text"], key=choice["id"]):
+# Чтобы ключи кнопок были уникальны даже при повторяющихся id от модели
+event_key_prefix = str(len(st.session_state.history))
+
+for i, choice in enumerate(event.get("choices", [])):
+    btn_key = f"{event_key_prefix}:{choice.get('id','')[:40]}:{i}"
+    if st.button(choice.get("text", "???"), key=btn_key):
         with st.spinner("Рассчитываем последствия..."):
-            result = generate_consequences(choice["id"], choice["text"])
+            result = generate_consequences(choice.get("id", ""), choice.get("text", ""))
 
         if not result:
-            st.error("Ошибка генерации последствий")
+            st.error("Ошибка генерации последствий (модель вернула невалидный JSON).")
             st.stop()
 
         apply_effects(result)
 
-        st.success(result["result_text"])
+        st.success(result.get("result_text", ""))
         st.session_state.current_event = None
         st.rerun()
+
+# История (опционально)
+if st.session_state.history:
+    with st.expander("📚 История (последние 10)"):
+        for h in st.session_state.history[-10:][::-1]:
+            st.markdown(f"**Событие:** {h.get('event','')}")
+            st.markdown(f"**Итог:** {h.get('result','')}")
+            st.markdown("---")
