@@ -1,11 +1,12 @@
 # app.py
 # ============================================================
-# 🧙 AI-Driven Adventure (Streamlit MVP + Menu + Rooms)
+# 🧙 AI-Driven Adventure (Streamlit MVP + Menu + Rooms + Final Arc)
 # - Rooms (room_id) isolate players on the same deployed app
 # - Menu with return from game without losing session
 # - One hero per room • One active campaign per room
-# - After finale -> "🔁 Начать новую историю" (same hero, new world)
+# - One-call-per-turn DM (consequence + next scene + choices)
 # - Russian narrative • Inventory + Spells • Summary every N turns
+# - FINAL ARC: when remaining turns <= final_arc_turns, DM is guided to climax
 # - Single-file, neatly sectioned
 # ============================================================
 
@@ -34,6 +35,10 @@ DEFAULT_MAX_TURNS = 15
 DEFAULT_INV_LIMIT = 10
 
 SUMMARY_EVERY_TURNS = 10  # create summary every N turns (when possible)
+
+# Final arc defaults (guide DM toward climax)
+FINAL_ARC_MAP_DEFAULT = {10: 3, 15: 4, 20: 5}
+FINAL_ARC_FALLBACK = 4  # if max_turns not in map
 
 # Text length targets (soft; used in prompting)
 LEN_PRESET = {
@@ -91,6 +96,10 @@ class DMSettings:
     choices_count: int = 3  # default 3, can be 4
     inventory_limit: int = DEFAULT_INV_LIMIT
     max_turns: int = DEFAULT_MAX_TURNS
+
+    # FINAL ARC: how many last turns should steer toward climax (excluding final turn itself guidance exists)
+    final_arc_turns: int = FINAL_ARC_FALLBACK
+
     debug_mode: bool = False
     temperature: Optional[float] = None  # optional advanced (if supported)
 
@@ -144,7 +153,7 @@ def db_init_and_migrate(conn: sqlite3.Connection) -> None:
     """
     cur = conn.cursor()
 
-    # Base tables
+    # Base tables (older shape)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS hero (
             hero_id TEXT PRIMARY KEY,
@@ -195,7 +204,6 @@ def db_init_and_migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
 
     # --- Migrate to rooms ---
-    # Add room_id to hero/campaign/turns if missing, and backfill DEFAULT
     hero_cols = _table_columns(conn, "hero")
     if "room_id" not in hero_cols:
         cur.execute("ALTER TABLE hero ADD COLUMN room_id TEXT")
@@ -214,32 +222,62 @@ def db_init_and_migrate(conn: sqlite3.Connection) -> None:
         cur.execute("UPDATE turns SET room_id = 'DEFAULT' WHERE room_id IS NULL")
         conn.commit()
 
-    # Helpful indexes (optional)
+    # Helpful indexes
     cur.execute("CREATE INDEX IF NOT EXISTS idx_hero_room ON hero(room_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_campaign_room ON campaign(room_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_turns_room ON turns(room_id)")
     conn.commit()
+
+def _default_final_arc_turns(max_turns: int) -> int:
+    val = FINAL_ARC_MAP_DEFAULT.get(int(max_turns), FINAL_ARC_FALLBACK)
+    # must be at least 2, and not exceed max_turns-1 (you need a final turn)
+    return max(2, min(int(val), max(2, int(max_turns) - 1)))
 
 def load_settings(conn: sqlite3.Connection) -> DMSettings:
     cur = conn.cursor()
     row = cur.execute("SELECT json FROM settings WHERE id = 1").fetchone()
     if not row:
         s = DMSettings()
+        # set a sensible final arc default based on default max turns
+        s.final_arc_turns = _default_final_arc_turns(s.max_turns)
         save_settings(conn, s)
         return s
+
     try:
         data = json.loads(row["json"])
     except Exception:
         s = DMSettings()
+        s.final_arc_turns = _default_final_arc_turns(s.max_turns)
         save_settings(conn, s)
         return s
+
     s = DMSettings()
     for k, v in data.items():
         if hasattr(s, k):
             setattr(s, k, v)
+
+    # normalize/clamp final_arc_turns
+    try:
+        s.max_turns = int(s.max_turns)
+    except Exception:
+        s.max_turns = DEFAULT_MAX_TURNS
+    try:
+        s.final_arc_turns = int(s.final_arc_turns)
+    except Exception:
+        s.final_arc_turns = _default_final_arc_turns(s.max_turns)
+
+    s.final_arc_turns = max(2, min(s.final_arc_turns, max(2, s.max_turns - 1)))
+    # if missing in older settings json, prefer map default
+    if "final_arc_turns" not in data:
+        s.final_arc_turns = _default_final_arc_turns(s.max_turns)
+
     return s
 
 def save_settings(conn: sqlite3.Connection, settings: DMSettings) -> None:
+    # clamp before saving
+    settings.max_turns = int(settings.max_turns)
+    settings.final_arc_turns = max(2, min(int(settings.final_arc_turns), max(2, settings.max_turns - 1)))
+
     cur = conn.cursor()
     cur.execute(
         "INSERT OR REPLACE INTO settings (id, json) VALUES (1, ?)",
@@ -273,9 +311,7 @@ def save_hero(conn: sqlite3.Connection, hero: Hero) -> None:
     conn.commit()
 
 def delete_room_data(conn: sqlite3.Connection, room_id: str) -> None:
-    """
-    Deletes hero + campaign + turns only for this room.
-    """
+    """Deletes hero + campaign + turns only for this room."""
     cur = conn.cursor()
     cur.execute("DELETE FROM turns WHERE room_id = ?", (room_id,))
     cur.execute("DELETE FROM campaign WHERE room_id = ?", (room_id,))
@@ -283,9 +319,7 @@ def delete_room_data(conn: sqlite3.Connection, room_id: str) -> None:
     conn.commit()
 
 def delete_campaign_only(conn: sqlite3.Connection, room_id: str) -> None:
-    """
-    Deletes campaign + turns for this room, keeps hero.
-    """
+    """Deletes campaign + turns for this room, keeps hero."""
     cur = conn.cursor()
     cur.execute("DELETE FROM turns WHERE room_id = ?", (room_id,))
     cur.execute("DELETE FROM campaign WHERE room_id = ?", (room_id,))
@@ -438,11 +472,10 @@ def load_recent_turns(conn: sqlite3.Connection, room_id: str, campaign_id: str, 
 def normalize_room_id(s: str) -> str:
     s = (s or "").strip().upper()
     s = re.sub(r"[^A-Z0-9_-]", "", s)
-    return s[:24]  # keep it reasonable
+    return s[:24]
 
 def generate_room_id(length: int = 6) -> str:
     alphabet = string.ascii_uppercase + string.digits
-    # simple time-based variation without importing random (keeps file minimal)
     t = int(time.time() * 1000)
     out = []
     for i in range(length):
@@ -518,6 +551,7 @@ def call_llm_json(
             resp = client.responses.create(**kwargs)
             text = safe_get_output_text(resp)
             return extract_first_json(text)
+
         except Exception as e:
             last_err = e
             if attempt < retries:
@@ -565,6 +599,7 @@ def make_base_system_prompt(settings: DMSettings) -> str:
 - Мягкий провал допустим (герой выжил, но не достиг цели / потерял шанс / усилил угрозу).
 - Не повторяйся и не пересказывай одно и то же разными формулировками.
 - Избегай воды. Стиль художественный, но плотный.
+- Внутри scene_text/consequence_text избегай двойных кавычек ". Если нужны кавычки — используй «ёлочки».
 
 Темп и баланс сцен:
 - Бои/опасность: {bc:.2f}
@@ -668,11 +703,48 @@ def next_turn_prompt(
             "scene_text": r.get("scene_text", ""),
         })
 
-    final_turn = (c.turn_index >= c.max_turns - 1)
+    # remaining turns after this generation
+    remaining_after_this = (c.max_turns - (c.turn_index + 1))
+    final_turn = (c.turn_index >= c.max_turns - 1)  # safety; should not happen usually
+    is_final_turn = (remaining_after_this <= 0)
 
-    return json.dumps({
+    # Final arc mode: start guiding N turns before the end (including the penultimate turns),
+    # but not earlier than needed.
+    final_arc_turns = max(2, min(int(settings.final_arc_turns), max(2, c.max_turns - 1)))
+    in_final_arc = (remaining_after_this <= final_arc_turns)
+
+    if is_final_turn:
+        phase = "FINAL_TURN"
+    elif in_final_arc:
+        phase = "FINAL_ARC"
+    else:
+        phase = "NORMAL"
+
+    final_arc_instruction = ""
+    if phase == "FINAL_ARC":
+        final_arc_instruction = (
+            f"FINAL ARC MODE: до финала осталось {remaining_after_this} ход(а). "
+            "Веди к кульминации и развязке на последнем ходу. "
+            "Не вводи новых крупных сюжетных линий/главных злодеев/фракций. "
+            "Сфокусируйся на завершении существующих нитей (open_threads/summary), "
+            "подними ставки, делай сцены более направленными, но без смерти героя."
+        )
+    elif phase == "FINAL_TURN":
+        final_arc_instruction = (
+            "FINAL TURN: это последний ход. Дай завершённую развязку и короткий эпилог, "
+            "закрой открытые нити, НЕ вводи новые сюжетные линии. "
+            "Верни is_final=true и НЕ возвращай choices."
+        )
+
+    payload = {
         "hero": {"name": hero.name, "class": hero.hero_class, "race": hero.race},
-        "turn": {"index": c.turn_index, "max_turns": c.max_turns, "is_final_turn": final_turn},
+        "turn": {
+            "index": c.turn_index,
+            "max_turns": c.max_turns,
+            "remaining_after_this": remaining_after_this,
+            "phase": phase,
+            "final_arc_turns": final_arc_turns,
+        },
         "chosen": chosen,
         "inventory": inv,
         "spells": spl,
@@ -686,9 +758,10 @@ def next_turn_prompt(
             "no_death": True,
             "soft_fail_allowed": True,
             "inventory_limit": settings.inventory_limit,
-            "final_turn_rules": "If is_final_turn=true, return is_final=true and no choices. Resolve threads, no new plotlines."
+            "phase_guidance": final_arc_instruction,
         }
-    }, ensure_ascii=False, indent=2)
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 def apply_state_changes(c: Campaign, changes: Dict[str, Any], settings: DMSettings) -> None:
     if not changes:
@@ -782,6 +855,7 @@ def maybe_create_summary(
 
     recent = load_recent_turns(conn, c.room_id, c.campaign_id, limit=SUMMARY_EVERY_TURNS)
     system = make_base_system_prompt(settings)
+
     prompt = {
         "hero": {"name": hero.name, "class": hero.hero_class, "race": hero.race},
         "turn_index": c.turn_index,
@@ -797,7 +871,10 @@ def maybe_create_summary(
         "inventory": [asdict(i) for i in c.inventory],
         "spells": [asdict(s) for s in c.spells],
         "flags": c.flags,
-        "task": "Сделай краткое саммари последних ходов, чтобы дальше можно было продолжать без раздувания контекста.",
+        "task": (
+            "Сделай краткое саммари последних ходов, чтобы дальше можно было продолжать без раздувания контекста. "
+            "Обязательно перечисли открытые нити (open_threads), которые важно закрыть к финалу."
+        ),
         "return_schema": {
             "summary": ["..."],
             "open_threads": ["..."],
@@ -907,6 +984,7 @@ def validate_turn_response(obj: Dict[str, Any], expect_choices: bool) -> Tuple[b
     if "consequence_text" not in obj and expect_choices:
         return False, "Нет поля consequence_text (после выбора оно должно быть)."
     if obj.get("is_final") is True:
+        # final: no choices required
         return True, ""
     if expect_choices:
         if "choices" not in obj or not isinstance(obj["choices"], list) or len(obj["choices"]) < 2:
@@ -925,9 +1003,10 @@ def dm_next_turn(
     system = make_base_system_prompt(settings)
     recent = load_recent_turns(conn, room_id, c.campaign_id, limit=3)
     prompt_payload = next_turn_prompt(c, hero, chosen, recent, settings)
+
     input_messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_payload}]
 
-    max_out = 1400 if not (c.turn_index >= c.max_turns - 1) else 1700
+    max_out = 1400
     obj = call_llm_json(
         client=client,
         model=settings.model,
@@ -957,7 +1036,6 @@ def dm_next_turn(
 # ============================================================
 
 def pill(text: str) -> str:
-    # explicitly set color so it works in light/dark themes
     return (
         "<span style='padding:2px 8px;border-radius:999px;"
         "background:#f1f3f6;font-size:12px;color:#111'>"
@@ -1017,20 +1095,18 @@ db_init_and_migrate(conn)
 
 settings = load_settings(conn)
 
-# ---------------- Sidebar: DM settings + room tools ----------------
+# ---------------- Sidebar: Room tools + DM settings ----------------
 
 with st.sidebar:
     st.header("🏠 Комната")
     current_room = st.session_state.room_id or ""
     st.caption("Комната — это код, который изолирует историю. Разные комнаты = разные игроки.")
 
-    # Show current room and quick actions
     if current_room:
         st.markdown(f"**Текущая:** `{current_room}`")
         col_a, col_b = st.columns(2)
         with col_a:
-            if st.button("📋 Скопировать", use_container_width=True):
-                # Streamlit has no direct clipboard API; show for manual copy.
+            if st.button("📋 Показать код", use_container_width=True):
                 st.info(f"Код комнаты: {current_room}")
         with col_b:
             if st.button("🚪 Сменить", use_container_width=True):
@@ -1063,10 +1139,22 @@ with st.sidebar:
 
     with st.expander("🔧 Advanced"):
         debug_mode = st.checkbox("Debug mode (показывать world/blueprint)", value=bool(settings.debug_mode))
+
         temp_enabled = st.checkbox("Указать temperature", value=settings.temperature is not None)
         temperature = None
         if temp_enabled:
             temperature = st.slider("temperature", 0.0, 1.0, float(settings.temperature if settings.temperature is not None else 0.7), 0.05)
+
+        # Final arc control (safe, clamped)
+        default_fa = _default_final_arc_turns(int(max_turns))
+        final_arc_turns = st.number_input(
+            "Final Arc (последние N ходов ведём к развязке)",
+            min_value=2,
+            max_value=max(2, int(max_turns) - 1),
+            value=int(settings.final_arc_turns) if int(settings.max_turns) == int(max_turns) else int(default_fa),
+            step=1,
+            help="Когда до финала остаётся N ходов, DM перестаёт вводить новые крупные линии и ведёт к кульминации."
+        )
 
     if st.button("💾 Сохранить настройки", use_container_width=True):
         settings.model = model.strip() or DEFAULT_MODEL
@@ -1082,6 +1170,13 @@ with st.sidebar:
         settings.system_prompt = system_prompt
         settings.debug_mode = bool(debug_mode)
         settings.temperature = float(temperature) if temp_enabled else None
+
+        # If user changed max_turns, default final arc can shift; keep user's input but clamp safely
+        try:
+            settings.final_arc_turns = int(final_arc_turns)
+        except Exception:
+            settings.final_arc_turns = _default_final_arc_turns(settings.max_turns)
+
         save_settings(conn, settings)
         st.success("Сохранено. Применится со следующего хода.")
 
@@ -1150,7 +1245,6 @@ if st.session_state.view == "menu":
     st.subheader("🏠 Меню")
     st.caption(f"Комната: `{room_id}`")
 
-    # Status cards
     colA, colB = st.columns([1, 1])
 
     with colA:
@@ -1171,7 +1265,6 @@ if st.session_state.view == "menu":
 
     st.divider()
 
-    # Actions
     if not hero:
         st.write("Создай героя, чтобы начать приключение.")
         if st.button("🧙 Создать героя", use_container_width=True):
@@ -1179,11 +1272,11 @@ if st.session_state.view == "menu":
             st.rerun()
         st.stop()
 
-    # Hero exists
     if campaign and not campaign.is_completed:
         if st.button("▶️ Продолжить историю", use_container_width=True):
             st.session_state.view = "adventure"
             st.rerun()
+
     elif campaign and campaign.is_completed:
         st.success("История завершена. Можно начать новую.")
         if st.button("🔁 Начать новую историю", use_container_width=True):
@@ -1205,8 +1298,8 @@ if st.session_state.view == "menu":
             except Exception as e:
                 st.session_state.error = f"Не удалось начать новую кампанию: {e}"
                 st.rerun()
+
     else:
-        # No campaign
         if st.button("🌟 Начать историю", use_container_width=True):
             client, err = _client_or_error()
             if not client:
@@ -1260,7 +1353,7 @@ if st.session_state.view == "hero_creation":
                 st.session_state.error = err
                 st.rerun()
 
-            # Safety: one hero per room. Replace existing data in this room.
+            # one hero per room: replace existing data in this room
             delete_room_data(conn, room_id)
 
             hero = start_hero(room_id=room_id, name=name, hero_class=hero_class, race=race)
@@ -1292,7 +1385,6 @@ if st.session_state.view != "adventure":
     st.session_state.view = "menu"
     st.rerun()
 
-# Ensure hero/campaign exist for adventure
 if hero is None:
     st.session_state.view = "hero_creation"
     st.rerun()
@@ -1321,7 +1413,6 @@ with right:
         st.session_state.last_choice_lock = False
         st.rerun()
 
-    # Debug view (hidden by default, but easy to enable)
     if settings.debug_mode:
         with st.expander("🧪 Debug: World Bible"):
             st.json(campaign.world_bible)
@@ -1329,13 +1420,22 @@ with right:
             st.json(campaign.blueprint)
         with st.expander("🧪 Debug: Summary"):
             st.json(campaign.summary or {})
+        with st.expander("🧪 Debug: Final Arc"):
+            remaining = campaign.max_turns - (campaign.turn_index + 1)
+            st.write({
+                "max_turns": campaign.max_turns,
+                "turn_index": campaign.turn_index,
+                "remaining_after_next": remaining,
+                "final_arc_turns": settings.final_arc_turns,
+                "in_final_arc": remaining <= settings.final_arc_turns
+            })
 
 with left:
     st.subheader("📖 Приключение")
+
     prog = min(1.0, (campaign.turn_index / max(1, campaign.max_turns)))
     st.progress(prog, text=f"Ход {campaign.turn_index + 1} из {campaign.max_turns}")
 
-    # consequence (explicit colors; no border)
     if campaign.last_consequence:
         st.markdown(
             "<div style='padding:10px 12px;border-radius:12px;"
@@ -1345,7 +1445,6 @@ with left:
             unsafe_allow_html=True
         )
 
-    # scene (explicit color; no border; subtle shadow)
     st.markdown(
         "<div style='padding:14px 16px;border-radius:16px;"
         "background:#ffffff;"
@@ -1358,7 +1457,6 @@ with left:
 
     st.write("")
 
-    # FINAL STATE
     if campaign.is_completed:
         st.success("🏁 История завершена.")
         cA, cB = st.columns([1, 1])
@@ -1389,7 +1487,6 @@ with left:
                 st.rerun()
         st.stop()
 
-    # CHOICES
     disabled = bool(st.session_state.last_choice_lock)
     shown_choices = (campaign.last_choices or [])[: max(2, min(4, int(settings.choices_count)))]
 
@@ -1401,6 +1498,7 @@ with left:
     for i, ch in enumerate(shown_choices):
         label = (ch.get("text") or "").strip()
         cid = (ch.get("id") or f"opt{i}").strip() or f"opt{i}"
+
         if choice_button(label, key=f"choice_{room_id}_{campaign.campaign_id}_{campaign.turn_index}_{cid}", disabled=disabled):
             st.session_state.last_choice_lock = True
             st.session_state.error = ""
@@ -1416,7 +1514,7 @@ with left:
             try:
                 resp = dm_next_turn(client, room_id, hero, campaign, chosen, settings, conn)
 
-                # Store the full response
+                # Store full response
                 add_turn(conn, room_id, campaign.campaign_id, campaign.turn_index + 1, cid, label, resp)
 
                 # Apply state changes
@@ -1448,7 +1546,7 @@ with left:
                 # Summary (optional)
                 maybe_create_summary(client, hero, campaign, settings, conn)
 
-                # Persist campaign
+                # Persist
                 save_campaign(conn, campaign)
 
                 st.session_state.last_choice_lock = False
@@ -1461,7 +1559,7 @@ with left:
 
     st.write("")
     st.caption("Можно менять настройки DM в сайдбаре — они влияют на последующие ходы.")
-    st.caption("Комната изолирует историю: отправь друзьям ссылку + их отдельные коды комнат.")
+    st.caption("Final Arc мягко ведёт к развязке за несколько ходов до конца, чтобы финал не был «обрубком».")
 
 # ============================================================
 # RUN INSTRUCTIONS
