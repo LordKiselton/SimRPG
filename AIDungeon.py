@@ -22,7 +22,7 @@ import streamlit as st
 # CONFIG
 # ============================================================
 
-APP_TITLE = "🧙 AI Adventure (DnD-like)"
+APP_TITLE = "🧙 AI Adventure"
 DB_PATH = os.environ.get("ADVENTURE_DB_PATH", "adventure.db")
 
 DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")  # safe default; can override in UI/env
@@ -1027,7 +1027,7 @@ def _client_or_error():
 # HERO CREATION SCREEN (no hero yet)
 # ------------------------------------------------------------
 if hero is None:
-    st.subheader("🧙 Создание героя")
+    st.subheader("👤 Создание героя")
 
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
