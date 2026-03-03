@@ -1,9 +1,12 @@
 # app.py
 # ============================================================
-# 🧙 AI-Driven Adventure (Streamlit MVP)
-# One hero • One active campaign • One-call-per-turn DM
-# Russian narrative • Inventory + Spells • Summary every N turns
-# After finale -> "🔁 Начать новую историю" (same hero, new world)
+# 🧙 AI-Driven Adventure (Streamlit MVP + Menu + Rooms)
+# - Rooms (room_id) isolate players on the same deployed app
+# - Menu with return from game without losing session
+# - One hero per room • One active campaign per room
+# - After finale -> "🔁 Начать новую историю" (same hero, new world)
+# - Russian narrative • Inventory + Spells • Summary every N turns
+# - Single-file, neatly sectioned
 # ============================================================
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+import string
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,10 +26,10 @@ import streamlit as st
 # CONFIG
 # ============================================================
 
-APP_TITLE = "🧙 AI Adventure"
+APP_TITLE = "🧙 AI Adventure (DnD-like)"
 DB_PATH = os.environ.get("ADVENTURE_DB_PATH", "adventure.db")
 
-DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")  # safe default; can override in UI/env
+DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")  # override via env/UI
 DEFAULT_MAX_TURNS = 15
 DEFAULT_INV_LIMIT = 10
 
@@ -53,6 +57,7 @@ TONE_PRESET = {
 @dataclass
 class Hero:
     hero_id: str
+    room_id: str
     name: str
     hero_class: str
     race: str
@@ -83,7 +88,7 @@ class DMSettings:
     balance_exploration: float = 0.33
     balance_social: float = 0.34
     consequence_intensity: str = "normal"  # low/normal/high
-    choices_count: int = 3  # default 3, can be 4 (architectural)
+    choices_count: int = 3  # default 3, can be 4
     inventory_limit: int = DEFAULT_INV_LIMIT
     max_turns: int = DEFAULT_MAX_TURNS
     debug_mode: bool = False
@@ -92,6 +97,7 @@ class DMSettings:
 @dataclass
 class Campaign:
     campaign_id: str
+    room_id: str
     hero_id: str
     created_at: float
     max_turns: int
@@ -114,7 +120,7 @@ class Campaign:
 
 
 # ============================================================
-# STORAGE (SQLite)
+# STORAGE (SQLite) + MIGRATION
 # ============================================================
 
 def db_connect() -> sqlite3.Connection:
@@ -122,8 +128,23 @@ def db_connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
-def db_init(conn: sqlite3.Connection) -> None:
+def _table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
     cur = conn.cursor()
+    try:
+        rows = cur.execute(f"PRAGMA table_info({table})").fetchall()
+    except Exception:
+        return []
+    return [r["name"] for r in rows]
+
+def db_init_and_migrate(conn: sqlite3.Connection) -> None:
+    """
+    Creates tables if missing.
+    Migrates older DB (single-user) by adding room_id columns where needed.
+    Keeps previous data (assigned to room_id='DEFAULT').
+    """
+    cur = conn.cursor()
+
+    # Base tables
     cur.execute("""
         CREATE TABLE IF NOT EXISTS hero (
             hero_id TEXT PRIMARY KEY,
@@ -173,6 +194,32 @@ def db_init(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
 
+    # --- Migrate to rooms ---
+    # Add room_id to hero/campaign/turns if missing, and backfill DEFAULT
+    hero_cols = _table_columns(conn, "hero")
+    if "room_id" not in hero_cols:
+        cur.execute("ALTER TABLE hero ADD COLUMN room_id TEXT")
+        cur.execute("UPDATE hero SET room_id = 'DEFAULT' WHERE room_id IS NULL")
+        conn.commit()
+
+    campaign_cols = _table_columns(conn, "campaign")
+    if "room_id" not in campaign_cols:
+        cur.execute("ALTER TABLE campaign ADD COLUMN room_id TEXT")
+        cur.execute("UPDATE campaign SET room_id = 'DEFAULT' WHERE room_id IS NULL")
+        conn.commit()
+
+    turns_cols = _table_columns(conn, "turns")
+    if "room_id" not in turns_cols:
+        cur.execute("ALTER TABLE turns ADD COLUMN room_id TEXT")
+        cur.execute("UPDATE turns SET room_id = 'DEFAULT' WHERE room_id IS NULL")
+        conn.commit()
+
+    # Helpful indexes (optional)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_hero_room ON hero(room_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_campaign_room ON campaign(room_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_turns_room ON turns(room_id)")
+    conn.commit()
+
 def load_settings(conn: sqlite3.Connection) -> DMSettings:
     cur = conn.cursor()
     row = cur.execute("SELECT json FROM settings WHERE id = 1").fetchone()
@@ -186,7 +233,6 @@ def load_settings(conn: sqlite3.Connection) -> DMSettings:
         s = DMSettings()
         save_settings(conn, s)
         return s
-    # allow partial/missing keys
     s = DMSettings()
     for k, v in data.items():
         if hasattr(s, k):
@@ -195,16 +241,23 @@ def load_settings(conn: sqlite3.Connection) -> DMSettings:
 
 def save_settings(conn: sqlite3.Connection, settings: DMSettings) -> None:
     cur = conn.cursor()
-    cur.execute("INSERT OR REPLACE INTO settings (id, json) VALUES (1, ?)", (json.dumps(asdict(settings), ensure_ascii=False),))
+    cur.execute(
+        "INSERT OR REPLACE INTO settings (id, json) VALUES (1, ?)",
+        (json.dumps(asdict(settings), ensure_ascii=False),),
+    )
     conn.commit()
 
-def load_hero(conn: sqlite3.Connection) -> Optional[Hero]:
+def load_hero(conn: sqlite3.Connection, room_id: str) -> Optional[Hero]:
     cur = conn.cursor()
-    row = cur.execute("SELECT * FROM hero LIMIT 1").fetchone()
+    row = cur.execute(
+        "SELECT * FROM hero WHERE room_id = ? ORDER BY created_at DESC LIMIT 1",
+        (room_id,),
+    ).fetchone()
     if not row:
         return None
     return Hero(
         hero_id=row["hero_id"],
+        room_id=row["room_id"],
         name=row["name"],
         hero_class=row["hero_class"],
         race=row["race"],
@@ -214,21 +267,36 @@ def load_hero(conn: sqlite3.Connection) -> Optional[Hero]:
 def save_hero(conn: sqlite3.Connection, hero: Hero) -> None:
     cur = conn.cursor()
     cur.execute("""
-        INSERT OR REPLACE INTO hero (hero_id, name, hero_class, race, created_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (hero.hero_id, hero.name, hero.hero_class, hero.race, hero.created_at))
+        INSERT OR REPLACE INTO hero (hero_id, room_id, name, hero_class, race, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (hero.hero_id, hero.room_id, hero.name, hero.hero_class, hero.race, hero.created_at))
     conn.commit()
 
-def delete_all(conn: sqlite3.Connection) -> None:
+def delete_room_data(conn: sqlite3.Connection, room_id: str) -> None:
+    """
+    Deletes hero + campaign + turns only for this room.
+    """
     cur = conn.cursor()
-    cur.execute("DELETE FROM turns")
-    cur.execute("DELETE FROM campaign")
-    cur.execute("DELETE FROM hero")
+    cur.execute("DELETE FROM turns WHERE room_id = ?", (room_id,))
+    cur.execute("DELETE FROM campaign WHERE room_id = ?", (room_id,))
+    cur.execute("DELETE FROM hero WHERE room_id = ?", (room_id,))
     conn.commit()
 
-def load_campaign(conn: sqlite3.Connection) -> Optional[Campaign]:
+def delete_campaign_only(conn: sqlite3.Connection, room_id: str) -> None:
+    """
+    Deletes campaign + turns for this room, keeps hero.
+    """
     cur = conn.cursor()
-    row = cur.execute("SELECT * FROM campaign LIMIT 1").fetchone()
+    cur.execute("DELETE FROM turns WHERE room_id = ?", (room_id,))
+    cur.execute("DELETE FROM campaign WHERE room_id = ?", (room_id,))
+    conn.commit()
+
+def load_campaign(conn: sqlite3.Connection, room_id: str) -> Optional[Campaign]:
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT * FROM campaign WHERE room_id = ? ORDER BY created_at DESC LIMIT 1",
+        (room_id,),
+    ).fetchone()
     if not row:
         return None
 
@@ -269,32 +337,34 @@ def load_campaign(conn: sqlite3.Connection) -> Optional[Campaign]:
 
     return Campaign(
         campaign_id=row["campaign_id"],
+        room_id=row["room_id"],
         hero_id=row["hero_id"],
         created_at=row["created_at"],
         max_turns=row["max_turns"],
         turn_index=row["turn_index"],
         is_completed=bool(row["is_completed"]),
-        world_bible=world_bible,
-        blueprint=blueprint,
+        world_bible=world_bible if isinstance(world_bible, dict) else {},
+        blueprint=blueprint if isinstance(blueprint, dict) else {},
         inventory=_load_items(row["inventory_json"]),
         spells=_load_spells(row["spells_json"]),
-        flags=flags,
-        summary=summary,
+        flags=flags if isinstance(flags, dict) else {},
+        summary=summary if isinstance(summary, (dict, type(None))) else None,
         last_consequence=row["last_consequence"],
         last_scene=row["last_scene"],
-        last_choices=last_choices,
+        last_choices=last_choices if isinstance(last_choices, list) else [],
     )
 
 def save_campaign(conn: sqlite3.Connection, c: Campaign) -> None:
     cur = conn.cursor()
     cur.execute("""
         INSERT OR REPLACE INTO campaign (
-            campaign_id, hero_id, created_at, max_turns, turn_index, is_completed,
+            campaign_id, room_id, hero_id, created_at, max_turns, turn_index, is_completed,
             world_bible_json, blueprint_json, inventory_json, spells_json, flags_json, summary_json,
             last_consequence, last_scene, last_choices_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         c.campaign_id,
+        c.room_id,
         c.hero_id,
         c.created_at,
         c.max_turns,
@@ -312,12 +382,21 @@ def save_campaign(conn: sqlite3.Connection, c: Campaign) -> None:
     ))
     conn.commit()
 
-def add_turn(conn: sqlite3.Connection, campaign_id: str, turn_index: int, choice_id: Optional[str], choice_text: Optional[str], response_obj: Dict[str, Any]) -> None:
+def add_turn(
+    conn: sqlite3.Connection,
+    room_id: str,
+    campaign_id: str,
+    turn_index: int,
+    choice_id: Optional[str],
+    choice_text: Optional[str],
+    response_obj: Dict[str, Any]
+) -> None:
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO turns (campaign_id, turn_index, choice_id, choice_text, response_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO turns (room_id, campaign_id, turn_index, choice_id, choice_text, response_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
+        room_id,
         campaign_id,
         turn_index,
         choice_id,
@@ -327,15 +406,16 @@ def add_turn(conn: sqlite3.Connection, campaign_id: str, turn_index: int, choice
     ))
     conn.commit()
 
-def load_recent_turns(conn: sqlite3.Connection, campaign_id: str, limit: int = 3) -> List[Dict[str, Any]]:
+def load_recent_turns(conn: sqlite3.Connection, room_id: str, campaign_id: str, limit: int = 3) -> List[Dict[str, Any]]:
     cur = conn.cursor()
     rows = cur.execute("""
         SELECT turn_index, choice_id, choice_text, response_json
         FROM turns
-        WHERE campaign_id = ?
+        WHERE room_id = ? AND campaign_id = ?
         ORDER BY id DESC
         LIMIT ?
-    """, (campaign_id, limit)).fetchall()
+    """, (room_id, campaign_id, limit)).fetchall()
+
     out: List[Dict[str, Any]] = []
     for r in reversed(rows):
         try:
@@ -352,41 +432,53 @@ def load_recent_turns(conn: sqlite3.Connection, campaign_id: str, limit: int = 3
 
 
 # ============================================================
+# ROOM HELPERS
+# ============================================================
+
+def normalize_room_id(s: str) -> str:
+    s = (s or "").strip().upper()
+    s = re.sub(r"[^A-Z0-9_-]", "", s)
+    return s[:24]  # keep it reasonable
+
+def generate_room_id(length: int = 6) -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    # simple time-based variation without importing random (keeps file minimal)
+    t = int(time.time() * 1000)
+    out = []
+    for i in range(length):
+        out.append(alphabet[(t + i * 37) % len(alphabet)])
+        t = (t * 1103515245 + 12345) & 0x7FFFFFFF
+    return "".join(out)
+
+# ============================================================
 # OPENAI CLIENT (Responses API)
 # ============================================================
 
 def get_openai_client():
-    """
-    Uses OPENAI_API_KEY from env or Streamlit secrets.
-    """
     api_key = None
     if "OPENAI_API_KEY" in st.secrets:
         api_key = st.secrets["OPENAI_API_KEY"]
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
-
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not set. Add it to env or Streamlit secrets.")
-
     try:
         from openai import OpenAI  # type: ignore
     except Exception as e:
         raise RuntimeError("openai package is not installed. Run: pip install openai") from e
-
     return OpenAI(api_key=api_key)
 
-def extract_first_json(text: str) -> Dict[str, Any]:
-    """
-    Robust-ish JSON extraction:
-    - If model returns pure JSON: json.loads works.
-    - If it wraps JSON in text/fences: we attempt to extract the first {...} block.
-    """
-    text = text.strip()
+def safe_get_output_text(resp: Any) -> str:
+    if hasattr(resp, "output_text") and isinstance(resp.output_text, str):
+        return resp.output_text
+    if isinstance(resp, dict) and "output_text" in resp and isinstance(resp["output_text"], str):
+        return resp["output_text"]
+    return str(resp)
 
-    # strip markdown fences
+def extract_first_json(text: str) -> Dict[str, Any]:
+    text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
 
-    # try direct
     try:
         obj = json.loads(text)
         if isinstance(obj, dict):
@@ -394,7 +486,6 @@ def extract_first_json(text: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # find first {...} (naive but effective for MVP)
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
@@ -405,28 +496,14 @@ def extract_first_json(text: str) -> Dict[str, Any]:
 
     raise ValueError("Could not parse JSON from model output.")
 
-def safe_get_output_text(resp: Any) -> str:
-    """
-    Works with OpenAI Responses API objects.
-    We try common access patterns.
-    """
-    # openai-python typically: resp.output_text
-    if hasattr(resp, "output_text") and isinstance(resp.output_text, str):
-        return resp.output_text
-
-    # fallback: try dict-like
-    if isinstance(resp, dict):
-        if "output_text" in resp and isinstance(resp["output_text"], str):
-            return resp["output_text"]
-
-    # last resort: try to stringify
-    return str(resp)
-
-def call_llm_json(client, model: str, input_messages: List[Dict[str, str]], max_output_tokens: int = 1200,
-                  temperature: Optional[float] = None, retries: int = 2) -> Dict[str, Any]:
-    """
-    Calls Responses API. Expects JSON in text output. Retries with stricter instruction if invalid.
-    """
+def call_llm_json(
+    client,
+    model: str,
+    input_messages: List[Dict[str, str]],
+    max_output_tokens: int = 1200,
+    temperature: Optional[float] = None,
+    retries: int = 2
+) -> Dict[str, Any]:
     last_err: Optional[Exception] = None
     for attempt in range(retries + 1):
         try:
@@ -443,7 +520,6 @@ def call_llm_json(client, model: str, input_messages: List[Dict[str, str]], max_
             return extract_first_json(text)
         except Exception as e:
             last_err = e
-            # tighten the instruction on retry
             if attempt < retries:
                 input_messages = input_messages + [{
                     "role": "system",
@@ -474,7 +550,6 @@ def make_base_system_prompt(settings: DMSettings) -> str:
         "high": "Последствия более жёсткие и ощутимые; риск потерь выше, но без смертельного исхода.",
     }.get(settings.consequence_intensity, "Последствия умеренные и правдоподобные; есть риски и выгоды.")
 
-    # User-editable system prompt appended at end
     extra = settings.system_prompt.strip()
     if extra:
         extra = "\n\nДополнительные правила автора:\n" + extra
@@ -487,8 +562,9 @@ def make_base_system_prompt(settings: DMSettings) -> str:
 Цели:
 - Консистентность NPC, локаций, фактов (не переименовывай и не противоречь уже введённому).
 - Каждое решение игрока должно ощутимо влиять на историю (факты/флаги/ресурсы/отношения), но БЕЗ смерти героя.
-- Не повторяйся и не пересказывай одно и то же в разных формулировках.
-- Избегай лишней воды и повторов. Стиль художественный, но плотный.
+- Мягкий провал допустим (герой выжил, но не достиг цели / потерял шанс / усилил угрозу).
+- Не повторяйся и не пересказывай одно и то же разными формулировками.
+- Избегай воды. Стиль художественный, но плотный.
 
 Темп и баланс сцен:
 - Бои/опасность: {bc:.2f}
@@ -572,14 +648,16 @@ def world_and_blueprint_prompt(hero: Hero) -> str:
 }}
 """
 
-def next_turn_prompt(c: Campaign, hero: Hero, chosen: Dict[str, str], recent_turns: List[Dict[str, Any]], settings: DMSettings) -> str:
-    """
-    One call per turn: consequence + next scene + next choices.
-    """
+def next_turn_prompt(
+    c: Campaign,
+    hero: Hero,
+    chosen: Dict[str, str],
+    recent_turns: List[Dict[str, Any]],
+    settings: DMSettings
+) -> str:
     inv = [asdict(i) for i in c.inventory]
     spl = [asdict(s) for s in c.spells]
 
-    # compact recent turns for context (no long raw text)
     compact_recent: List[Dict[str, Any]] = []
     for t in recent_turns:
         r = t.get("response", {}) or {}
@@ -590,7 +668,6 @@ def next_turn_prompt(c: Campaign, hero: Hero, chosen: Dict[str, str], recent_tur
             "scene_text": r.get("scene_text", ""),
         })
 
-    # final turn signals
     final_turn = (c.turn_index >= c.max_turns - 1)
 
     return json.dumps({
@@ -614,25 +691,19 @@ def next_turn_prompt(c: Campaign, hero: Hero, chosen: Dict[str, str], recent_tur
     }, ensure_ascii=False, indent=2)
 
 def apply_state_changes(c: Campaign, changes: Dict[str, Any], settings: DMSettings) -> None:
-    """
-    Applies inventory/spells/flags changes safely.
-    """
     if not changes:
         return
 
-    # inventory remove
     remove = changes.get("inventory_remove") or []
     if isinstance(remove, list) and remove:
         remove_set = set(str(x) for x in remove)
         c.inventory = [it for it in c.inventory if it.item_id not in remove_set and it.name not in remove_set]
 
-    # spells remove
     sremove = changes.get("spells_remove") or []
     if isinstance(sremove, list) and sremove:
         remove_set = set(str(x) for x in sremove)
         c.spells = [sp for sp in c.spells if sp.spell_id not in remove_set and sp.name not in remove_set]
 
-    # inventory add (respect limit)
     add = changes.get("inventory_add") or []
     if isinstance(add, list) and add:
         for x in add:
@@ -654,7 +725,6 @@ def apply_state_changes(c: Campaign, changes: Dict[str, Any], settings: DMSettin
             except Exception:
                 continue
 
-    # spells add
     sadd = changes.get("spells_add") or []
     if isinstance(sadd, list) and sadd:
         for x in sadd:
@@ -670,20 +740,17 @@ def apply_state_changes(c: Campaign, changes: Dict[str, Any], settings: DMSettin
                     description=desc,
                     type=typ,
                 )
-                # avoid duplicates by name
                 if any(s.name.lower() == sp.name.lower() for s in c.spells):
                     continue
                 c.spells.append(sp)
             except Exception:
                 continue
 
-    # flags set
     fset = changes.get("flags_set") or {}
     if isinstance(fset, dict):
         for k, v in fset.items():
             c.flags[str(k)] = v
 
-    # flags delta
     fdelta = changes.get("flags_delta") or {}
     if isinstance(fdelta, dict):
         for k, v in fdelta.items():
@@ -699,11 +766,13 @@ def apply_state_changes(c: Campaign, changes: Dict[str, Any], settings: DMSettin
                 cur_num = 0.0
             c.flags[key] = cur_num + delta
 
-def maybe_create_summary(client, hero: Hero, c: Campaign, settings: DMSettings, conn: sqlite3.Connection) -> None:
-    """
-    Every SUMMARY_EVERY_TURNS turns (and not too early), ask model to summarize to keep context compact.
-    Uses recent turns from DB for better fidelity.
-    """
+def maybe_create_summary(
+    client,
+    hero: Hero,
+    c: Campaign,
+    settings: DMSettings,
+    conn: sqlite3.Connection
+) -> None:
     if c.turn_index <= 0:
         return
     if c.turn_index % SUMMARY_EVERY_TURNS != 0:
@@ -711,7 +780,7 @@ def maybe_create_summary(client, hero: Hero, c: Campaign, settings: DMSettings, 
     if c.is_completed:
         return
 
-    recent = load_recent_turns(conn, c.campaign_id, limit=SUMMARY_EVERY_TURNS)
+    recent = load_recent_turns(conn, c.room_id, c.campaign_id, limit=SUMMARY_EVERY_TURNS)
     system = make_base_system_prompt(settings)
     prompt = {
         "hero": {"name": hero.name, "class": hero.hero_class, "race": hero.race},
@@ -749,7 +818,6 @@ def maybe_create_summary(client, hero: Hero, c: Campaign, settings: DMSettings, 
             temperature=settings.temperature,
             retries=2,
         )
-        # minimal validation
         if isinstance(obj, dict) and "summary" in obj:
             c.summary = {
                 "summary": obj.get("summary", []),
@@ -757,7 +825,6 @@ def maybe_create_summary(client, hero: Hero, c: Campaign, settings: DMSettings, 
                 "canon": obj.get("canon", []),
             }
     except Exception:
-        # summary is optional; don't break the game
         return
 
 
@@ -768,21 +835,20 @@ def maybe_create_summary(client, hero: Hero, c: Campaign, settings: DMSettings, 
 def new_id(prefix: str) -> str:
     return f"{prefix}_{int(time.time()*1000)}"
 
-def start_hero(name: str, hero_class: str, race: str) -> Hero:
+def start_hero(room_id: str, name: str, hero_class: str, race: str) -> Hero:
     return Hero(
         hero_id=new_id("hero"),
+        room_id=room_id,
         name=name.strip() or "Безымянный",
         hero_class=hero_class,
         race=race,
         created_at=time.time(),
     )
 
-def start_campaign(hero: Hero, settings: DMSettings, client) -> Campaign:
-    """
-    Creates new world + blueprint + first scene.
-    """
+def start_campaign(room_id: str, hero: Hero, settings: DMSettings, client) -> Campaign:
     c = Campaign(
         campaign_id=new_id("camp"),
+        room_id=room_id,
         hero_id=hero.hero_id,
         created_at=time.time(),
         max_turns=int(settings.max_turns),
@@ -799,11 +865,7 @@ def start_campaign(hero: Hero, settings: DMSettings, client) -> Campaign:
 
     system = make_base_system_prompt(settings)
     user_prompt = world_and_blueprint_prompt(hero)
-
-    input_messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_prompt},
-    ]
+    input_messages = [{"role": "system", "content": system}, {"role": "user", "content": user_prompt}]
 
     obj = call_llm_json(
         client=client,
@@ -818,11 +880,9 @@ def start_campaign(hero: Hero, settings: DMSettings, client) -> Campaign:
     blueprint = obj.get("campaign_blueprint", {}) if isinstance(obj, dict) else {}
     scene = obj.get("scene", {}) if isinstance(obj, dict) else {}
 
-    # validate scene
     scene_text = str(scene.get("scene_text", "")).strip()
     choices = scene.get("choices", [])
     if not scene_text or not isinstance(choices, list) or len(choices) < 2:
-        # fail safe: create a minimal fallback scene
         scene_text = "Ты открываешь глаза в шумном трактире на окраине города. За соседним столом спорят о странных исчезновениях в лесу."
         choices = [
             {"id": "A", "text": "Подойти и подслушать спор."},
@@ -830,7 +890,6 @@ def start_campaign(hero: Hero, settings: DMSettings, client) -> Campaign:
             {"id": "C", "text": "Выйти наружу и осмотреть улицу."},
         ]
 
-    # clamp choices to 4 and to settings.choices_count if possible
     choices = choices[: max(2, min(4, int(settings.choices_count)))]
 
     c.world_bible = world_bible if isinstance(world_bible, dict) else {}
@@ -841,35 +900,32 @@ def start_campaign(hero: Hero, settings: DMSettings, client) -> Campaign:
     return c
 
 def validate_turn_response(obj: Dict[str, Any], expect_choices: bool) -> Tuple[bool, str]:
-    """
-    Minimal validation with helpful error messages.
-    """
     if not isinstance(obj, dict):
         return False, "Ответ не является JSON-объектом."
     if "scene_text" not in obj:
         return False, "Нет поля scene_text."
     if "consequence_text" not in obj and expect_choices:
         return False, "Нет поля consequence_text (после выбора оно должно быть)."
-    if "is_final" in obj and obj.get("is_final") is True:
-        # final: no choices required
+    if obj.get("is_final") is True:
         return True, ""
     if expect_choices:
         if "choices" not in obj or not isinstance(obj["choices"], list) or len(obj["choices"]) < 2:
             return False, "Нет choices или choices некорректны."
     return True, ""
 
-def dm_next_turn(client, hero: Hero, c: Campaign, chosen: Dict[str, str], settings: DMSettings, conn: sqlite3.Connection) -> Dict[str, Any]:
-    """
-    One-call-per-turn: consequence + next scene + next choices OR final.
-    """
+def dm_next_turn(
+    client,
+    room_id: str,
+    hero: Hero,
+    c: Campaign,
+    chosen: Dict[str, str],
+    settings: DMSettings,
+    conn: sqlite3.Connection
+) -> Dict[str, Any]:
     system = make_base_system_prompt(settings)
-    recent = load_recent_turns(conn, c.campaign_id, limit=3)
+    recent = load_recent_turns(conn, room_id, c.campaign_id, limit=3)
     prompt_payload = next_turn_prompt(c, hero, chosen, recent, settings)
-
-    input_messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": prompt_payload},
-    ]
+    input_messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_payload}]
 
     max_out = 1400 if not (c.turn_index >= c.max_turns - 1) else 1700
     obj = call_llm_json(
@@ -883,7 +939,6 @@ def dm_next_turn(client, hero: Hero, c: Campaign, chosen: Dict[str, str], settin
 
     ok, err = validate_turn_response(obj, expect_choices=True)
     if not ok:
-        # attempt one more “hard” retry with explicit error
         input_messages.append({"role": "system", "content": f"Исправь ответ. Ошибка: {err}. Верни валидный JSON по схеме."})
         obj = call_llm_json(
             client=client,
@@ -902,7 +957,13 @@ def dm_next_turn(client, hero: Hero, c: Campaign, chosen: Dict[str, str], settin
 # ============================================================
 
 def pill(text: str) -> str:
-    return f"<span style='padding:2px 8px;border-radius:999px;background:#f1f3f6;font-size:12px'>{text}</span>"
+    # explicitly set color so it works in light/dark themes
+    return (
+        "<span style='padding:2px 8px;border-radius:999px;"
+        "background:#f1f3f6;font-size:12px;color:#111'>"
+        f"{text}"
+        "</span>"
+    )
 
 def render_inventory(items: List[Item]) -> None:
     if not items:
@@ -924,14 +985,22 @@ def choice_button(label: str, key: str, disabled: bool = False) -> bool:
     return st.button(label, key=key, use_container_width=True, disabled=disabled)
 
 def ensure_session_defaults() -> None:
-    if "pending_settings_apply_next_turn" not in st.session_state:
-        st.session_state.pending_settings_apply_next_turn = False
+    if "room_id" not in st.session_state:
+        st.session_state.room_id = ""
+    if "view" not in st.session_state:
+        st.session_state.view = "room"  # room -> menu -> hero_creation/adventure
     if "last_choice_lock" not in st.session_state:
         st.session_state.last_choice_lock = False
     if "error" not in st.session_state:
         st.session_state.error = ""
     if "info" not in st.session_state:
         st.session_state.info = ""
+
+def _client_or_error():
+    try:
+        return get_openai_client(), ""
+    except Exception as e:
+        return None, str(e)
 
 
 # ============================================================
@@ -944,17 +1013,37 @@ st.title(APP_TITLE)
 ensure_session_defaults()
 
 conn = db_connect()
-db_init(conn)
+db_init_and_migrate(conn)
 
 settings = load_settings(conn)
-hero = load_hero(conn)
-campaign = load_campaign(conn)
 
-# Sidebar: DM settings
+# ---------------- Sidebar: DM settings + room tools ----------------
+
 with st.sidebar:
+    st.header("🏠 Комната")
+    current_room = st.session_state.room_id or ""
+    st.caption("Комната — это код, который изолирует историю. Разные комнаты = разные игроки.")
+
+    # Show current room and quick actions
+    if current_room:
+        st.markdown(f"**Текущая:** `{current_room}`")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("📋 Скопировать", use_container_width=True):
+                # Streamlit has no direct clipboard API; show for manual copy.
+                st.info(f"Код комнаты: {current_room}")
+        with col_b:
+            if st.button("🚪 Сменить", use_container_width=True):
+                st.session_state.view = "room"
+                st.session_state.last_choice_lock = False
+                st.rerun()
+    else:
+        st.markdown("**Текущая:** _не выбрана_")
+
+    st.divider()
+
     st.header("⚙ Настройки DM")
 
-    # These settings can change during play; apply next turn by design.
     model = st.text_input("Модель", value=settings.model)
     scene_length = st.selectbox("Длина сцен", ["short", "medium", "long"], index=["short", "medium", "long"].index(settings.scene_length))
     tone = st.selectbox("Тон", ["classic", "heroic", "dark", "light_irony"], index=["classic", "heroic", "dark", "light_irony"].index(settings.tone))
@@ -966,11 +1055,11 @@ with st.sidebar:
 
     consequence_intensity = st.selectbox("Жёсткость последствий", ["low", "normal", "high"], index=["low", "normal", "high"].index(settings.consequence_intensity))
     choices_count = st.selectbox("Вариантов выбора", [3, 4], index=[3, 4].index(int(settings.choices_count)))
-    max_turns = st.selectbox("Длина сессии (ходов)", [10, 15, 20], index=[10, 15, 20].index(int(settings.max_turns)) if int(settings.max_turns) in [10,15,20] else 1)
+    max_turns = st.selectbox("Длина сессии (ходов)", [10, 15, 20], index=[10, 15, 20].index(int(settings.max_turns)) if int(settings.max_turns) in [10, 15, 20] else 1)
     inv_limit = st.number_input("Лимит инвентаря", min_value=3, max_value=30, value=int(settings.inventory_limit), step=1)
 
     st.subheader("📝 Системный промпт (доп. правила)")
-    system_prompt = st.text_area(" ", value=settings.system_prompt, height=160, placeholder="Например: меньше кровищи; больше детективности; избегай клише...")
+    system_prompt = st.text_area(" ", value=settings.system_prompt, height=160, placeholder="Например: меньше клише; больше детективности; избегай мата...")
 
     with st.expander("🔧 Advanced"):
         debug_mode = st.checkbox("Debug mode (показывать world/blueprint)", value=bool(settings.debug_mode))
@@ -979,7 +1068,6 @@ with st.sidebar:
         if temp_enabled:
             temperature = st.slider("temperature", 0.0, 1.0, float(settings.temperature if settings.temperature is not None else 0.7), 0.05)
 
-    # Save settings button (applies next turn)
     if st.button("💾 Сохранить настройки", use_container_width=True):
         settings.model = model.strip() or DEFAULT_MODEL
         settings.scene_length = scene_length
@@ -994,40 +1082,161 @@ with st.sidebar:
         settings.system_prompt = system_prompt
         settings.debug_mode = bool(debug_mode)
         settings.temperature = float(temperature) if temp_enabled else None
-
         save_settings(conn, settings)
-        st.session_state.pending_settings_apply_next_turn = True
         st.success("Сохранено. Применится со следующего хода.")
 
     st.divider()
-
-    st.subheader("🧹 Сброс")
-    if st.button("🗑️ Сбросить всё (герой + кампания)", use_container_width=True):
-        delete_all(conn)
+    st.subheader("🧹 Сброс (текущая комната)")
+    if current_room and st.button("🗑️ Удалить героя и кампанию в комнате", use_container_width=True):
+        delete_room_data(conn, current_room)
         st.session_state.last_choice_lock = False
-        st.session_state.error = ""
-        st.session_state.info = "Сброшено. Создай героя заново."
+        st.session_state.info = "Данные комнаты удалены. Создай героя заново."
+        st.session_state.view = "menu"
         st.rerun()
 
-# Info/Error banners
+# ---------------- Info/Error banners ----------------
+
 if st.session_state.info:
     st.info(st.session_state.info)
     st.session_state.info = ""
 if st.session_state.error:
     st.error(st.session_state.error)
 
-# Client creation (only when needed)
-def _client_or_error():
-    try:
-        return get_openai_client(), ""
-    except Exception as e:
-        return None, str(e)
+# ============================================================
+# VIEW: ROOM (enter/switch room)
+# ============================================================
 
-# ------------------------------------------------------------
-# HERO CREATION SCREEN (no hero yet)
-# ------------------------------------------------------------
-if hero is None:
-    st.subheader("👤 Создание героя")
+if st.session_state.view == "room":
+    st.subheader("🏠 Вход в комнату")
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        room_input = st.text_input("Код комнаты", value=st.session_state.room_id or "", placeholder="Например: X4F8Q2")
+    with col2:
+        if st.button("🎲 Сгенерировать", use_container_width=True):
+            st.session_state.room_id = generate_room_id(6)
+            st.rerun()
+
+    st.caption("Используй один и тот же код, чтобы вернуться к своей истории с другого устройства.")
+
+    if st.button("➡️ Продолжить", use_container_width=True):
+        rid = normalize_room_id(room_input)
+        if not rid:
+            st.session_state.error = "Введи код комнаты (или сгенерируй)."
+            st.rerun()
+        st.session_state.room_id = rid
+        st.session_state.view = "menu"
+        st.session_state.last_choice_lock = False
+        st.session_state.error = ""
+        st.rerun()
+
+    st.stop()
+
+# From here we always have a room_id
+room_id = normalize_room_id(st.session_state.room_id)
+if not room_id:
+    st.session_state.view = "room"
+    st.rerun()
+
+# Load room-specific data
+hero = load_hero(conn, room_id)
+campaign = load_campaign(conn, room_id)
+
+# ============================================================
+# VIEW: MENU
+# ============================================================
+
+if st.session_state.view == "menu":
+    st.subheader("🏠 Меню")
+    st.caption(f"Комната: `{room_id}`")
+
+    # Status cards
+    colA, colB = st.columns([1, 1])
+
+    with colA:
+        st.markdown("### 👤 Герой")
+        if hero:
+            st.markdown(f"**{hero.name}**  \n{pill(hero.hero_class)} {pill(hero.race)}", unsafe_allow_html=True)
+        else:
+            st.write("Герой не создан.")
+
+    with colB:
+        st.markdown("### 📜 Кампания")
+        if campaign:
+            status = "🏁 завершена" if campaign.is_completed else "▶️ в процессе"
+            st.write(f"Статус: **{status}**")
+            st.write(f"Ход: **{campaign.turn_index + 1} / {campaign.max_turns}**")
+        else:
+            st.write("Кампания отсутствует.")
+
+    st.divider()
+
+    # Actions
+    if not hero:
+        st.write("Создай героя, чтобы начать приключение.")
+        if st.button("🧙 Создать героя", use_container_width=True):
+            st.session_state.view = "hero_creation"
+            st.rerun()
+        st.stop()
+
+    # Hero exists
+    if campaign and not campaign.is_completed:
+        if st.button("▶️ Продолжить историю", use_container_width=True):
+            st.session_state.view = "adventure"
+            st.rerun()
+    elif campaign and campaign.is_completed:
+        st.success("История завершена. Можно начать новую.")
+        if st.button("🔁 Начать новую историю", use_container_width=True):
+            client, err = _client_or_error()
+            if not client:
+                st.session_state.error = err
+                st.rerun()
+            try:
+                delete_campaign_only(conn, room_id)
+                campaign = start_campaign(room_id, hero, settings, client)
+                save_campaign(conn, campaign)
+                add_turn(conn, room_id, campaign.campaign_id, 0, None, None, {
+                    "scene_text": campaign.last_scene,
+                    "choices": campaign.last_choices,
+                    "canonical_updates": {}
+                })
+                st.session_state.view = "adventure"
+                st.rerun()
+            except Exception as e:
+                st.session_state.error = f"Не удалось начать новую кампанию: {e}"
+                st.rerun()
+    else:
+        # No campaign
+        if st.button("🌟 Начать историю", use_container_width=True):
+            client, err = _client_or_error()
+            if not client:
+                st.session_state.error = err
+                st.rerun()
+            try:
+                campaign = start_campaign(room_id, hero, settings, client)
+                save_campaign(conn, campaign)
+                add_turn(conn, room_id, campaign.campaign_id, 0, None, None, {
+                    "scene_text": campaign.last_scene,
+                    "choices": campaign.last_choices,
+                    "canonical_updates": {}
+                })
+                st.session_state.view = "adventure"
+                st.rerun()
+            except Exception as e:
+                st.session_state.error = f"Не удалось начать кампанию: {e}"
+                st.rerun()
+
+    st.write("")
+    st.caption("Подсказка: ты можешь выйти в меню из игры и вернуться без потери прогресса.")
+    st.stop()
+
+# ============================================================
+# VIEW: HERO CREATION
+# ============================================================
+
+if st.session_state.view == "hero_creation":
+    st.subheader("🧙 Создание героя")
+    st.caption(f"Комната: `{room_id}`")
 
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
@@ -1037,66 +1246,59 @@ if hero is None:
     with col3:
         race = st.selectbox("Раса", ["Human", "Elf", "Dwarf"], index=0)
 
-    st.caption("После создания герой сразу начнёт новую историю.")
+    st.caption("После создания герой сможет начать одну активную историю в этой комнате.")
 
-    if st.button("🚀 Начать приключение", use_container_width=True):
-        client, err = _client_or_error()
-        if not client:
-            st.session_state.error = err
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("⬅️ В меню", use_container_width=True):
+            st.session_state.view = "menu"
             st.rerun()
+    with c2:
+        if st.button("🚀 Создать и начать", use_container_width=True):
+            client, err = _client_or_error()
+            if not client:
+                st.session_state.error = err
+                st.rerun()
 
-        hero = start_hero(name=name, hero_class=hero_class, race=race)
-        save_hero(conn, hero)
+            # Safety: one hero per room. Replace existing data in this room.
+            delete_room_data(conn, room_id)
 
-        # Start new campaign right away
-        try:
-            campaign = start_campaign(hero, settings, client)
-            save_campaign(conn, campaign)
-            add_turn(conn, campaign.campaign_id, 0, None, None, {
-                "scene_text": campaign.last_scene,
-                "choices": campaign.last_choices,
-                "canonical_updates": {}
-            })
-        except Exception as e:
-            st.session_state.error = f"Не удалось начать кампанию: {e}"
-            st.rerun()
+            hero = start_hero(room_id=room_id, name=name, hero_class=hero_class, race=race)
+            save_hero(conn, hero)
 
-        st.rerun()
+            try:
+                campaign = start_campaign(room_id, hero, settings, client)
+                save_campaign(conn, campaign)
+                add_turn(conn, room_id, campaign.campaign_id, 0, None, None, {
+                    "scene_text": campaign.last_scene,
+                    "choices": campaign.last_choices,
+                    "canonical_updates": {}
+                })
+                st.session_state.view = "adventure"
+                st.session_state.last_choice_lock = False
+                st.rerun()
+            except Exception as e:
+                st.session_state.error = f"Не удалось начать кампанию: {e}"
+                st.session_state.view = "menu"
+                st.rerun()
 
     st.stop()
 
-# ------------------------------------------------------------
-# CAMPAIGN INIT (hero exists but campaign not)
-# ------------------------------------------------------------
+# ============================================================
+# VIEW: ADVENTURE (Main game)
+# ============================================================
+
+if st.session_state.view != "adventure":
+    st.session_state.view = "menu"
+    st.rerun()
+
+# Ensure hero/campaign exist for adventure
+if hero is None:
+    st.session_state.view = "hero_creation"
+    st.rerun()
 if campaign is None:
-    st.subheader("📜 Кампания не найдена")
-    st.write("Нажми кнопку, чтобы начать новую историю.")
-
-    if st.button("🌟 Начать новую историю", use_container_width=True):
-        client, err = _client_or_error()
-        if not client:
-            st.session_state.error = err
-            st.rerun()
-
-        try:
-            campaign = start_campaign(hero, settings, client)
-            save_campaign(conn, campaign)
-            add_turn(conn, campaign.campaign_id, 0, None, None, {
-                "scene_text": campaign.last_scene,
-                "choices": campaign.last_choices,
-                "canonical_updates": {}
-            })
-        except Exception as e:
-            st.session_state.error = f"Не удалось начать кампанию: {e}"
-            st.rerun()
-
-        st.rerun()
-
-    st.stop()
-
-# ------------------------------------------------------------
-# MAIN ADVENTURE SCREEN
-# ------------------------------------------------------------
+    st.session_state.view = "menu"
+    st.rerun()
 
 left, right = st.columns([2.2, 1])
 
@@ -1113,6 +1315,12 @@ with right:
     render_spells(campaign.spells)
     st.divider()
 
+    st.subheader("🏠 Навигация")
+    if st.button("🏠 В меню", use_container_width=True):
+        st.session_state.view = "menu"
+        st.session_state.last_choice_lock = False
+        st.rerun()
+
     # Debug view (hidden by default, but easy to enable)
     if settings.debug_mode:
         with st.expander("🧪 Debug: World Bible"):
@@ -1124,22 +1332,27 @@ with right:
 
 with left:
     st.subheader("📖 Приключение")
-
     prog = min(1.0, (campaign.turn_index / max(1, campaign.max_turns)))
     st.progress(prog, text=f"Ход {campaign.turn_index + 1} из {campaign.max_turns}")
 
+    # consequence (explicit colors; no border)
     if campaign.last_consequence:
         st.markdown(
-            f"<div style='padding:10px 12px;border-radius:12px;background:#f7f8fa;color:#111'>"
+            "<div style='padding:10px 12px;border-radius:12px;"
+            "background:#f7f8fa;color:#111;line-height:1.45'>"
             f"⚡ {campaign.last_consequence}"
-            f"</div>",
+            "</div>",
             unsafe_allow_html=True
         )
 
+    # scene (explicit color; no border; subtle shadow)
     st.markdown(
-        f"<div style='padding:14px 16px;border-radius:16px;background:white; solid #111'>"
+        "<div style='padding:14px 16px;border-radius:16px;"
+        "background:#ffffff;"
+        "box-shadow:0 2px 6px rgba(0,0,0,0.05);"
+        "color:#111;line-height:1.55;font-size:16px'>"
         f"{campaign.last_scene}"
-        f"</div>",
+        "</div>",
         unsafe_allow_html=True
     )
 
@@ -1148,51 +1361,47 @@ with left:
     # FINAL STATE
     if campaign.is_completed:
         st.success("🏁 История завершена.")
-        if st.button("🔁 Начать новую историю", use_container_width=True):
-            client, err = _client_or_error()
-            if not client:
-                st.session_state.error = err
-                st.rerun()
-
-            # wipe campaign and turns, keep hero
-            cur = conn.cursor()
-            cur.execute("DELETE FROM turns WHERE campaign_id = ?", (campaign.campaign_id,))
-            cur.execute("DELETE FROM campaign")
-            conn.commit()
-
-            try:
-                campaign = start_campaign(hero, settings, client)
-                save_campaign(conn, campaign)
-                add_turn(conn, campaign.campaign_id, 0, None, None, {
-                    "scene_text": campaign.last_scene,
-                    "choices": campaign.last_choices,
-                    "canonical_updates": {}
-                })
+        cA, cB = st.columns([1, 1])
+        with cA:
+            if st.button("🔁 Начать новую историю", use_container_width=True):
+                client, err = _client_or_error()
+                if not client:
+                    st.session_state.error = err
+                    st.rerun()
+                try:
+                    delete_campaign_only(conn, room_id)
+                    campaign = start_campaign(room_id, hero, settings, client)
+                    save_campaign(conn, campaign)
+                    add_turn(conn, room_id, campaign.campaign_id, 0, None, None, {
+                        "scene_text": campaign.last_scene,
+                        "choices": campaign.last_choices,
+                        "canonical_updates": {}
+                    })
+                    st.session_state.last_choice_lock = False
+                    st.rerun()
+                except Exception as e:
+                    st.session_state.error = f"Не удалось начать новую кампанию: {e}"
+                    st.rerun()
+        with cB:
+            if st.button("🏠 В меню", use_container_width=True):
+                st.session_state.view = "menu"
                 st.session_state.last_choice_lock = False
-                st.session_state.pending_settings_apply_next_turn = False
-            except Exception as e:
-                st.session_state.error = f"Не удалось начать новую кампанию: {e}"
-
-            st.rerun()
-
+                st.rerun()
         st.stop()
 
     # CHOICES
     disabled = bool(st.session_state.last_choice_lock)
-
-    # Clamp to settings count (can change mid-run; applies next turn, but UI can show current)
     shown_choices = (campaign.last_choices or [])[: max(2, min(4, int(settings.choices_count)))]
 
     if not shown_choices:
-        st.warning("Нет вариантов выбора. Попробуй начать новую историю.")
+        st.warning("Нет вариантов выбора. Вернись в меню и начни новую историю.")
         st.stop()
 
     st.markdown("### 👉 Что ты сделаешь?")
     for i, ch in enumerate(shown_choices):
-        label = ch.get("text", "").strip()
-        cid = ch.get("id", f"opt{i}").strip() or f"opt{i}"
-        if choice_button(label, key=f"choice_{campaign.campaign_id}_{campaign.turn_index}_{cid}", disabled=disabled):
-            # lock to prevent double clicks
+        label = (ch.get("text") or "").strip()
+        cid = (ch.get("id") or f"opt{i}").strip() or f"opt{i}"
+        if choice_button(label, key=f"choice_{room_id}_{campaign.campaign_id}_{campaign.turn_index}_{cid}", disabled=disabled):
             st.session_state.last_choice_lock = True
             st.session_state.error = ""
 
@@ -1205,21 +1414,20 @@ with left:
             chosen = {"id": cid, "text": label}
 
             try:
-                # One-call-per-turn
-                resp = dm_next_turn(client, hero, campaign, chosen, settings, conn)
+                resp = dm_next_turn(client, room_id, hero, campaign, chosen, settings, conn)
 
-                # record turn BEFORE applying (we store full response)
-                add_turn(conn, campaign.campaign_id, campaign.turn_index + 1, cid, label, resp)
+                # Store the full response
+                add_turn(conn, room_id, campaign.campaign_id, campaign.turn_index + 1, cid, label, resp)
 
-                # Apply changes
+                # Apply state changes
                 state_changes = resp.get("state_changes", {}) if isinstance(resp, dict) else {}
                 apply_state_changes(campaign, state_changes if isinstance(state_changes, dict) else {}, settings)
 
-                # Update UI texts
+                # Update texts
                 campaign.last_consequence = str(resp.get("consequence_text", "")).strip()
                 campaign.last_scene = str(resp.get("scene_text", "")).strip()
 
-                # Final?
+                # Advance turn
                 is_final = bool(resp.get("is_final")) if isinstance(resp, dict) else False
                 campaign.turn_index += 1
 
@@ -1229,7 +1437,6 @@ with left:
                 else:
                     choices = resp.get("choices", [])
                     if not isinstance(choices, list) or len(choices) < 2:
-                        # fallback safe choices if model misbehaves
                         choices = [
                             {"id": "A", "text": "Продолжить осторожно."},
                             {"id": "B", "text": "Попробовать другой подход."},
@@ -1238,13 +1445,12 @@ with left:
                     choices = choices[: max(2, min(4, int(settings.choices_count)))]
                     campaign.last_choices = [{"id": str(x.get("id", "")).strip(), "text": str(x.get("text", "")).strip()} for x in choices]
 
-                # Maybe create summary (optional, doesn't break)
+                # Summary (optional)
                 maybe_create_summary(client, hero, campaign, settings, conn)
 
-                # Persist
+                # Persist campaign
                 save_campaign(conn, campaign)
 
-                # unlock
                 st.session_state.last_choice_lock = False
                 st.rerun()
 
@@ -1254,10 +1460,11 @@ with left:
                 st.rerun()
 
     st.write("")
-    st.caption("Совет: если стиль «поехал», поменяй настройки DM — они применятся со следующего хода.")
+    st.caption("Можно менять настройки DM в сайдбаре — они влияют на последующие ходы.")
+    st.caption("Комната изолирует историю: отправь друзьям ссылку + их отдельные коды комнат.")
 
 # ============================================================
-# RUN INSTRUCTIONS (for you)
+# RUN INSTRUCTIONS
 # ============================================================
 # 1) pip install streamlit openai
 # 2) export OPENAI_API_KEY="..."
