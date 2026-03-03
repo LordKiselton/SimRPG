@@ -1130,14 +1130,14 @@ with left:
 
     if campaign.last_consequence:
         st.markdown(
-            f"<div style='padding:10px 12px;border-radius:12px;background:#f7f8fa;color:#444'>"
+            f"<div style='padding:10px 12px;border-radius:12px;background:#f7f8fa;color:#111'>"
             f"⚡ {campaign.last_consequence}"
             f"</div>",
             unsafe_allow_html=True
         )
 
     st.markdown(
-        f"<div style='padding:14px 16px;border-radius:16px;background:white;border:1px solid #eee'>"
+        f"<div style='padding:14px 16px;border-radius:16px;background:white;border:1px solid #111'>"
         f"{campaign.last_scene}"
         f"</div>",
         unsafe_allow_html=True
