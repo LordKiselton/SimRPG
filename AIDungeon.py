@@ -1137,7 +1137,7 @@ with left:
         )
 
     st.markdown(
-        f"<div style='padding:14px 16px;border-radius:16px;background:white;border:1px solid #111'>"
+        f"<div style='padding:14px 16px;border-radius:16px;background:white; solid #111'>"
         f"{campaign.last_scene}"
         f"</div>",
         unsafe_allow_html=True
