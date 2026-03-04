@@ -38,7 +38,7 @@ import streamlit as st
 # CONFIG
 # ============================================================
 
-APP_TITLE = "🧙 AI Adventure (Narrative Book)"
+APP_TITLE = "AI Adventure"
 DB_PATH = os.environ.get("ADVENTURE_DB_PATH", "adventure.db")
 
 DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
@@ -1246,8 +1246,9 @@ def render_spells(spells: List[Spell]) -> None:
         icon = "🔥" if sp.type == "combat" else ("🧠" if sp.type == "social" else "✨")
         st.markdown(f"{icon} **{sp.name}**  \n<small>{sp.description}</small>", unsafe_allow_html=True)
 
-def render_journal(j: Journal) -> None:
-    st.subheader("📓 Журнал")
+def render_journal(j: Journal, show_title: bool = True) -> None:
+    if show_title:
+        st.subheader("📓 Журнал")
 
     st.markdown("**Встречены:**")
     if j.met_npcs:
@@ -1263,13 +1264,6 @@ def render_journal(j: Journal) -> None:
                 st.markdown(f"• <s>{o.text}</s>", unsafe_allow_html=True)
             else:
                 st.write(f"• {o.text}")
-    else:
-        st.caption("Пока нет")
-
-    st.markdown("**Важное:**")
-    if j.important_events:
-        for e in j.important_events[:15]:
-            st.write(f"• {e}")
     else:
         st.caption("Пока нет")
 
@@ -1319,23 +1313,17 @@ with st.sidebar:
 
     if current_room:
         st.markdown(f"**Текущая:** `{current_room}`")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("📋 Показать код", use_container_width=True):
-                st.info(f"Код комнаты: {current_room}")
-        with col_b:
-            if st.button("🚪 Сменить", use_container_width=True):
-                st.session_state.view = "room"
-                st.session_state.active_hero_id = ""
-                st.session_state.last_choice_lock = False
-                st.rerun()
+        if st.button("🚪 Сменить", use_container_width=True):
+            st.session_state.view = "room"
+            st.session_state.active_hero_id = ""
+            st.session_state.last_choice_lock = False
+            st.rerun()
     else:
         st.markdown("**Текущая:** _не выбрана_")
 
     st.divider()
 
     st.header("⚙ Настройки DM")
-    model = st.text_input("Модель", value=settings.model)
     scene_length = st.selectbox("Длина текста", ["short", "medium", "long"], index=["short", "medium", "long"].index(settings.scene_length))
     tone = st.selectbox("Тон", ["classic", "heroic", "dark", "light_irony"], index=["classic", "heroic", "dark", "light_irony"].index(settings.tone))
 
@@ -1371,7 +1359,6 @@ with st.sidebar:
         )
 
     if st.button("💾 Сохранить настройки", use_container_width=True):
-        settings.model = model.strip() or DEFAULT_MODEL
         settings.scene_length = scene_length
         settings.tone = tone
         settings.balance_combat = float(bc)
@@ -1567,11 +1554,10 @@ with right:
     st.caption(f"Приключений завершено: **{hero.completed_campaigns}**")
     st.divider()
 
-    if campaign:
-        st.subheader("📏 Прогресс")
-        st.write(f"Ход: **{campaign.turn_index + 1} / {campaign.max_turns}**")
-        st.write(f"Статус: **{'🏁 завершена' if campaign.is_completed else '▶️ в процессе'}**")
-        st.divider()
+    # Journal (collapsible) — placed above inventory, open by default
+    with st.expander("📓 Журнал", expanded=True):
+        render_journal(campaign.journal if campaign else Journal(), show_title=False)
+    st.divider()
 
     st.subheader(f"🎒 Инвентарь ({len(campaign.inventory) if campaign else 0}/{settings.inventory_limit})")
     render_inventory(campaign.inventory if campaign else [])
@@ -1579,10 +1565,6 @@ with right:
 
     st.subheader("✨ Заклинания")
     render_spells(campaign.spells if campaign else [])
-    st.divider()
-
-    # Journal
-    render_journal(campaign.journal if campaign else Journal())
     st.divider()
 
     st.subheader("🏠 Навигация")
@@ -1763,7 +1745,6 @@ with left:
 
     st.write("")
     st.caption("Настройки DM в сайдбаре влияют на последующие ходы.")
-    st.caption("Final Arc мягко ведёт к развязке за несколько ходов до конца.")
 
 # ============================================================
 # RUN INSTRUCTIONS
