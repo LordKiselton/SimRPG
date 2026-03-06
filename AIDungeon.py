@@ -1963,9 +1963,3 @@ with left:
 '''
 # Fix a tiny bug in the user's pasted base where we accidentally wrote st.session_state.rerun (typo).
 content = content.replace("st.session_state.rerun\n", "st.rerun()\n")
-
-out_path = "/mnt/data/app_styled.py"
-with open(out_path, "w", encoding="utf-8") as f:
-    f.write(content)
-
-out_path, len(content.splitlines())
