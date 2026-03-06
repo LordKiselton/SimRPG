@@ -1,6 +1,4 @@
-import textwrap, os, re, html, json, time, pathlib
-
-content = r'''# app.py
+# app.py
 # ============================================================
 # 🧙 AI-Driven Adventure (Streamlit) — Rooms + Multi-Hero + Journal + Final Arc
 #
@@ -1738,7 +1736,7 @@ if st.session_state.view == "hero_creation":
 
 if st.session_state.view != "adventure":
     st.session_state.view = "menu"
-    st.session_state.rerun
+    st.rerun()
 
 active_hero_id = str(st.session_state.active_hero_id or "").strip()
 hero = get_hero(conn, room_id, active_hero_id) if active_hero_id else None
@@ -1960,6 +1958,3 @@ with left:
 # Optional:
 # - export OPENAI_MODEL="gpt-4.1-mini"
 # - export ADVENTURE_DB_PATH="/path/to/adventure.db"
-'''
-# Fix a tiny bug in the user's pasted base where we accidentally wrote st.session_state.rerun (typo).
-content = content.replace("st.session_state.rerun\n", "st.rerun()\n")
