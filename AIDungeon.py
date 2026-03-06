@@ -642,11 +642,48 @@ def safe_get_output_text(resp: Any) -> str:
         return resp["output_text"]
     return str(resp)
 
-def extract_first_json(text: str) -> Dict[str, Any]:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
+def _extract_balanced_json_object(text: str) -> Optional[str]:
+    """
+    Tries to extract the first balanced JSON object substring from arbitrary text.
+    Handles extra text before/after JSON.
+    """
+    if not text:
+        return None
+    s = text.strip()
+    # Strip common markdown fences
+    s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*```$", "", s)
 
+    start = s.find("{")
+    if start == -1:
+        return None
+
+    in_str = False
+    esc = False
+    depth = 0
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return s[start:i + 1]
+    return None
+
+def extract_first_json(text: str) -> Dict[str, Any]:
+    text = (text or "").strip()
+    # Fast path: whole string is JSON
     try:
         obj = json.loads(text)
         if isinstance(obj, dict):
@@ -654,11 +691,21 @@ def extract_first_json(text: str) -> Dict[str, Any]:
     except Exception:
         pass
 
+    candidate = _extract_balanced_json_object(text)
+    if candidate:
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            pass
+
+    # Legacy heuristic (first '{' .. last '}')
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
-        candidate = text[start:end + 1]
-        obj = json.loads(candidate)
+        candidate2 = text[start:end + 1]
+        obj = json.loads(candidate2)
         if isinstance(obj, dict):
             return obj
 
@@ -672,27 +719,67 @@ def call_llm_json(
     temperature: Optional[float] = None,
     retries: int = 2
 ) -> Dict[str, Any]:
+    """
+    Robust JSON call:
+    - Calls the model
+    - Tries to parse JSON from output (tolerant extraction)
+    - If parsing fails, performs a JSON-repair call to the model and parses again
+    """
     last_err: Optional[Exception] = None
+
+    def _do_call(msgs: List[Dict[str, str]]) -> str:
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "input": msgs,
+            "max_output_tokens": int(max_output_tokens),
+        }
+        if temperature is not None:
+            kwargs["temperature"] = float(temperature)
+        resp = client.responses.create(**kwargs)
+        return safe_get_output_text(resp)
+
+    def _repair_json(bad_text: str) -> Dict[str, Any]:
+        # Use the same model to repair output into strict JSON only.
+        repair_msgs = [
+            {
+                "role": "system",
+                "content": (
+                    "Ты — инструмент починки JSON. "
+                    "Твоя задача: преобразовать входной текст в СТРОГО валидный JSON-объект. "
+                    "Верни ТОЛЬКО JSON, без markdown, без пояснений, без текста вокруг."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Исправь так, чтобы результат был валидным JSON-объектом (dict). "
+                    "Если есть лишний текст — удали. Если кавычки/запятые/скобки сломаны — почини.\n\n"
+                    "ВХОД:\n"
+                    + bad_text
+                ),
+            },
+        ]
+        repaired = _do_call(repair_msgs)
+        return extract_first_json(repaired)
+
     for attempt in range(retries + 1):
         try:
-            kwargs: Dict[str, Any] = {
-                "model": model,
-                "input": input_messages,
-                "max_output_tokens": int(max_output_tokens),
-            }
-            if temperature is not None:
-                kwargs["temperature"] = float(temperature)
-
-            resp = client.responses.create(**kwargs)
-            text = safe_get_output_text(resp)
-            return extract_first_json(text)
+            text = _do_call(input_messages)
+            try:
+                return extract_first_json(text)
+            except Exception as parse_err:
+                # Attempt repair once per attempt
+                try:
+                    return _repair_json(text)
+                except Exception as repair_err:
+                    raise repair_err from parse_err
 
         except Exception as e:
             last_err = e
             if attempt < retries:
                 input_messages = input_messages + [{
                     "role": "system",
-                    "content": "ВАЖНО: верни ТОЛЬКО валидный JSON, без пояснений, без markdown, без текста вокруг."
+                    "content": "ВАЖНО: верни ТОЛЬКО валидный JSON-объект, без пояснений, без markdown, без текста вокруг."
                 }]
                 continue
             break
@@ -1242,6 +1329,35 @@ def start_campaign(room_id: str, hero: Hero, settings: DMSettings, client) -> Ca
 
     world_bible = obj.get("world_bible", {}) if isinstance(obj, dict) else {}
     blueprint = obj.get("campaign_blueprint", {}) if isinstance(obj, dict) else {}
+
+    # Safety: ensure enemies scaffold exists for concreteness (GDD v2.0)
+    try:
+        if not isinstance(world_bible, dict):
+            world_bible = {}
+        enemies = world_bible.get("enemies")
+        if not isinstance(enemies, dict):
+            enemies = {}
+        ea = enemies.get("enemy_archetypes")
+        ka = enemies.get("key_antagonists")
+        if not isinstance(ea, list) or len(ea) < 3:
+            enemies["enemy_archetypes"] = [
+                {"name": "Разбойник-налётчик", "visual": "потрёпанный капюшон, короткий топор", "behavior": "давит числом, бьёт по рукам", "tell": "хриплый свист сигнала", "stakes": "потеря предмета или ранение"},
+                {"name": "Культянист с клинком", "visual": "обритая голова, амулет на шее", "behavior": "атакует резко, пытается зайти сбоку", "tell": "тихий звон амулета", "stakes": "ранение или проклятие"},
+                {"name": "Лесной гончий", "visual": "вытянутая морда, жёлтые глаза", "behavior": "преследует, рвёт на ходу", "tell": "царапины на коре и запах мокрой шерсти", "stakes": "ранение и преследование"},
+                {"name": "Наёмник-арбалетчик", "visual": "перчатки без пальцев, арбалет на ремне", "behavior": "держит дистанцию, выцеливает колени", "tell": "щёлк взвода тетивы", "stakes": "ранение или вынужденное отступление"},
+                {"name": "Страж-выбивала", "visual": "широкие плечи, дубинка в руке", "behavior": "давит силой, перекрывает путь", "tell": "тяжёлые шаги по камню", "stakes": "арест или потеря времени"},
+                {"name": "Злобный споровик", "visual": "пухлые наросты спор, влажная кожа", "behavior": "распыляет споры, мешает видеть", "tell": "горький запах плесени", "stakes": "ослепление или истощение"},
+            ]
+        if not isinstance(ka, list) or len(ka) < 1:
+            enemies["key_antagonists"] = [
+                {"name": "Архикультист Марвес", "motivation": "получить власть через древний ритуал", "weakness": "одержимость символом и страх разоблачения", "attitude_to_hero": "видит в тебе помеху и потенциальный инструмент", "hidden_truth": "ритуал разрушит то, что он якобы спасает", "signature": "клеймо-спираль на металле", "minions": ["Культянист с клинком", "Наёмник-арбалетчик"]}
+            ]
+        world_bible["enemies"] = enemies
+    except Exception:
+        pass
+
+    if not isinstance(blueprint, dict):
+        blueprint = {}
     scene = obj.get("scene", {}) if isinstance(obj, dict) else {}
 
     scene_text = str(scene.get("scene_text", "")).strip()
