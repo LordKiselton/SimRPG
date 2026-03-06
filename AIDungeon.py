@@ -734,7 +734,16 @@ def make_base_system_prompt(settings: DMSettings) -> str:
 - Мягкий провал допустим.
 - Не повторяйся. Не пересказывай одно и то же разными словами в одном тексте.
 - Запрещены мета-фразы: «перед вами выбор», «не спешите», «тактическая линия определит исход» и т.п.
-- Избегай двойных кавычек ". Если нужны кавычки — используй «ёлочки».
+- Избегай двойных кавычек \". Если нужны кавычки — используй «ёлочки».
+
+Голос и POV:
+- Всегда обращайся к игроку во 2-м лице: «ты». Не описывай героя в третьем лице.
+  Плохо: «Арен делает шаг…». Хорошо: «Ты делаешь шаг…».
+- NPC можно описывать в третьем лице. NPC могут обращаться к герою по имени и упоминать его, если нужно.
+
+Формат текста хода:
+- Делай 2–3 коротких логичных абзаца (переносы строк по смыслу), без увеличения объёма.
+- Каждый абзац должен добавлять новую информацию/ставку/изменение.
 
 Темп и баланс сцен:
 - Бои/опасность: {bc:.2f}
@@ -745,13 +754,38 @@ def make_base_system_prompt(settings: DMSettings) -> str:
 
 Стиль подачи хода:
 - Всегда один текстовый блок (turn_text): исход выбора + новое событие.
-- 2–3 абзаца максимум. Каждое предложение должно добавлять новую информацию/ставку/изменение.
+- 2–3 абзаца максимум.
 - Ориентир длины turn_text: ~{turn_chars} символов.
 - Финал: до ~{final_chars} символов.
 
 NPC при первой встрече:
 - Если NPC встречается впервые (его нет в journal.met_npcs), добавь ОДНО короткое предложение описания в turn_text
   и добавь NPC в journal_update.met_add. Далее не повторяй описание.
+
+Враги:
+- Избегай абстракций угрозы («тени», «нечто», «странные существа») вместо конкретики.
+  Используй конкретных противников из world_bible/enemies, либо вводи врага так, чтобы у него были
+  ясные приметы, поведение и тип угрозы.
+
+Ключевые выборы и story_score (скрыто от игрока):
+- В кампании есть скрытый счёт story_score в диапазоне [-10; +10]. Игрок не видит число, но должен
+  примерно понимать ставки.
+- Иногда payload укажет, что сейчас KEY CHOICE (key_choice_due=true). Тогда варианты выбора должны быть
+  «ключевыми»: с ясными ставками и возможными хорошими/плохими последствиями.
+- Обновление story_score делай ТОЛЬКО на ключевых выборах через state_changes.flags_delta.story_score.
+  Используй base_delta из множества {{-2,-1,0,+1,+2}} и умножай на вес по фазе:
+  - NORMAL: w=1
+  - FINAL_ARC: w=2
+  - FINAL_TURN: w=0
+  Формула: delta = base_delta * w.
+  Пример: base_delta=+1 в FINAL_ARC => story_score += +2.
+
+Архетипы финала (фэнтези) по story_score:
+- >= +4: Triumphant Victory
+- +2..+3: Bittersweet / Noble Sacrifice (опирайся на факты/флаги)
+- -1..+1: Pyrrhic / Mixed
+- -2..-3: Tragic Failure
+- <= -4: Corrupted Win / Dark Ascendancy (если решения вели к «тёмной» победе), иначе Tragic Failure
 
 Бои:
 - Боевые моменты должны быть конкретными: действие героя → ответ противника → итог/последствие.
@@ -789,7 +823,7 @@ NPC при первой встрече:
     "spells_add": [{{"name":"…","description":"…","type":"combat|utility|social"}}],
     "spells_remove": ["spell_name_or_id"],
     "flags_set": {{"key":"value"}},
-    "flags_delta": {{"relation_x": 1}}
+    "flags_delta": {{"story_score": 0, "relation_x": 1}}
   }},
   "canonical_updates": {{
     "new_npcs": [],
@@ -810,7 +844,8 @@ NPC при первой встрече:
 - НЕ возвращай choices
 - Дай развязку + короткий эпилог
 - Закрой цели и нити (используй journal.objectives и journal.important_events)
-- НЕ вводи новые крупные сюжетные линии
+- Не вводи новые крупные сюжетные линии
+- Выбери архетип финала на основе story_score и фактов/флагов
 
 {extra}
 """.strip()
@@ -825,13 +860,23 @@ def world_and_blueprint_prompt(hero: Hero) -> str:
 
 Нужно:
 1) world_bible: фракции, ключевые локации, общий конфликт, атмосфера.
-2) campaign_blueprint: главный конфликт, 2–4 ключевых NPC (имя/роль/мотивация/секрет), 3–6 локаций, возможные финалы.
-3) Затем — первую сцену (scene_text) и choices.
-4) Также — краткий journal_update для старта (цели/события).
+2) Враги (важно для конкретики):
+   - enemy_archetypes: 6–10 типовых противников. Каждый: name, visual(1–2 детали), behavior, tell(признак угрозы), stakes(тип угрозы).
+   - key_antagonists: 2–3 ключевых антагониста. Для каждого: name, motivation, weakness, attitude_to_hero, hidden_truth, signature, minions.
+   Часть противников может не встретиться, но все должны органично вписываться в сеттинг.
+3) campaign_blueprint: главный конфликт, 2–4 ключевых NPC (имя/роль/мотивация/секрет), 3–6 локаций, возможные финалы.
+4) Затем — первую сцену (scene_text) и choices.
+5) Также — краткий journal_update для старта (цели/события).
 
 Верни JSON строго такого вида:
 {{
-  "world_bible": {{...}},
+  "world_bible": {{
+    "...": "...",
+    "enemies": {{
+      "enemy_archetypes": [{{"name":"...","visual":"...","behavior":"...","tell":"...","stakes":"..."}}],
+      "key_antagonists": [{{"name":"...","motivation":"...","weakness":"...","attitude_to_hero":"...","hidden_truth":"...","signature":"...","minions":["..."]}}]
+    }}
+  }},
   "campaign_blueprint": {{...}},
   "scene": {{
     "scene_text": "...",
@@ -886,6 +931,20 @@ def next_turn_prompt(
             "Закрой цели/нити из journal. Верни is_final=true и без choices."
         )
 
+    # Key choice planner (from flags); key choices start from turn_index >= 1
+    key_turns: List[int] = []
+    try:
+        key_turns = list(c.flags.get("key_choice_turns", []) or [])
+    except Exception:
+        key_turns = []
+    key_done: set[int] = set()
+    try:
+        key_done = set(int(x) for x in (c.flags.get("key_choices_done", []) or []))
+    except Exception:
+        key_done = set()
+    next_turn_index = int(c.turn_index + 1)
+    key_choice_due = (next_turn_index in set(int(x) for x in key_turns)) and (next_turn_index not in key_done)
+
     payload = {
         "hero": {"name": hero.name, "class": hero.hero_class, "race": hero.race},
         "turn": {
@@ -910,6 +969,9 @@ def next_turn_prompt(
             "soft_fail_allowed": True,
             "inventory_limit": settings.inventory_limit,
             "phase_guidance": phase_guidance,
+            "key_choice_due": bool(key_choice_due),
+            "key_choice_turns": [int(x) for x in key_turns],
+            "story_score": float(c.flags.get("story_score", 0.0) or 0.0),
         }
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -988,6 +1050,12 @@ def apply_state_changes(c: Campaign, changes: Dict[str, Any], settings: DMSettin
             except Exception:
                 cur_num = 0.0
             c.flags[key] = cur_num + delta
+            # Clamp story_score to [-10, +10]
+            if key == "story_score":
+                try:
+                    c.flags[key] = max(-10.0, min(10.0, float(c.flags[key])))
+                except Exception:
+                    c.flags[key] = 0.0
 
 def _dedup_list_keep_order(xs: List[str], limit: Optional[int] = None) -> List[str]:
     seen = set()
@@ -1120,11 +1188,44 @@ def start_campaign(room_id: str, hero: Hero, settings: DMSettings, client) -> Ca
         inventory=[],
         spells=[],
         flags={},
+        # Hidden narrative meta (GDD v2.0)
+        # story_score is clamped to [-10, +10]
+        # key_choice_turns lists turn_index values where DM should produce a KEY CHOICE
         summary=None,
         journal=Journal(),
         last_turn_text="",
         last_choices=[],
     )
+
+    # Initialize hidden narrative meta
+    c.flags = c.flags or {}
+    c.flags.setdefault("story_score", 0.0)
+
+    # Plan key choices: round(max_turns/5), spread across NORMAL and FINAL_ARC (not on final turn)
+    key_target = max(1, int(round(c.max_turns / 5)))
+    final_arc_turns = max(2, min(int(settings.final_arc_turns), max(2, c.max_turns - 1)))
+    last_non_final = max(0, c.max_turns - 2)  # avoid final turn (max_turns-1)
+
+    turns: List[int] = []
+    if key_target == 1:
+        turns = [max(1, min(last_non_final, c.max_turns // 2))]
+    else:
+        t1 = max(1, min(last_non_final, c.max_turns // 2))
+        turns.append(t1)
+        start_final_arc_at = max(1, c.max_turns - final_arc_turns)
+        t2 = max(1, min(last_non_final, start_final_arc_at - 1))
+        if t2 not in turns:
+            turns.append(t2)
+        for k in range(2, key_target):
+            span = max(1, (last_non_final - start_final_arc_at + 1))
+            denom = max(1, (key_target - 2))
+            pos = start_final_arc_at + int(round((k - 1) * (span - 1) / denom))
+            pos = max(start_final_arc_at, min(last_non_final, pos))
+            if pos not in turns:
+                turns.append(pos)
+    turns = sorted(set(int(x) for x in turns if int(x) >= 1))
+    c.flags["key_choice_turns"] = turns
+    c.flags.setdefault("key_choices_done", [])
 
     system = make_base_system_prompt(settings)
     user_prompt = world_and_blueprint_prompt(hero)
@@ -1898,6 +1999,19 @@ with left:
                 # Apply state changes
                 state_changes = resp.get("state_changes", {}) if isinstance(resp, dict) else {}
                 apply_state_changes(campaign, state_changes if isinstance(state_changes, dict) else {}, settings)
+
+                # Mark key choice as consumed if it was due for this turn (meta only)
+                try:
+                    key_turns = list((campaign.flags or {}).get("key_choice_turns", []) or [])
+                    key_done = list((campaign.flags or {}).get("key_choices_done", []) or [])
+                    next_turn_index = int(campaign.turn_index + 1)
+                    due = (next_turn_index in set(int(x) for x in key_turns)) and (next_turn_index not in set(int(x) for x in key_done))
+                    if due:
+                        if next_turn_index not in set(int(x) for x in key_done):
+                            key_done.append(next_turn_index)
+                        (campaign.flags or {})["key_choices_done"] = key_done
+                except Exception:
+                    pass
 
                 # Apply journal update
                 jupd = resp.get("journal_update", {}) if isinstance(resp, dict) else {}
