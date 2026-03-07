@@ -1,7 +1,7 @@
 import streamlit as st
 import json
 import os
-import random
+import uuid
 from datetime import datetime
 
 # -----------------------------
@@ -77,8 +77,11 @@ def load_monsters():
 # Добавление существ
 # -----------------------------
 def add_player(name,ac,hp):
+    if not name.strip():
+        st.warning("Имя игрока не может быть пустым")
+        return
     st.session_state.creatures.append({
-        "id":random.random(),
+        "id":str(uuid.uuid4()),
         "name":name,
         "type":"player",
         "initiative":0,
@@ -93,7 +96,7 @@ def add_player(name,ac,hp):
 def add_monsters(monster,count):
     for i in range(count):
         st.session_state.creatures.append({
-            "id":random.random(),
+            "id":str(uuid.uuid4()),
             "name":f"{monster['name_ru']} {i+1}",
             "type":"monster",
             "initiative":0,
@@ -115,6 +118,8 @@ def start_combat():
     st.session_state.combat_started=True
 
 def next_turn():
+    if not st.session_state.creatures:
+        return
     st.session_state.turn+=1
     if st.session_state.turn>=len(st.session_state.creatures):
         st.session_state.turn=0
@@ -237,7 +242,6 @@ def main():
     st.divider()
     # -------- Battle Table --------
     for i,c in enumerate(st.session_state.creatures):
-        # компактные колонки
         bg_color = "#d3f9d8" if i==st.session_state.turn else None
         col_name,col_init,col_ac,col_hp,col_cond,col_info=st.columns([3,1,1,3,3,1])
         if bg_color:
