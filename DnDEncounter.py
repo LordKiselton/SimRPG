@@ -2,8 +2,6 @@ import streamlit as st
 import json
 import os
 import random
-import requests
-from bs4 import BeautifulSoup
 from datetime import datetime
 
 MONSTER_DB_FILE = "monsters.json"
@@ -16,10 +14,6 @@ CONDITIONS = [
     "Без сознания","Истощение"
 ]
 
-
-# ------------------------
-# INIT
-# ------------------------
 
 def init_session():
 
@@ -39,25 +33,17 @@ def init_session():
         st.session_state.selected_statblock = None
 
 
-# ------------------------
-# FILES
-# ------------------------
-
 def ensure_dirs():
     if not os.path.exists(ENCOUNTER_DIR):
         os.makedirs(ENCOUNTER_DIR)
 
-
-# ------------------------
-# MONSTER DB
-# ------------------------
 
 def load_monsters():
 
     if not os.path.exists(MONSTER_DB_FILE):
         create_sample_monsters()
 
-    with open(MONSTER_DB_FILE, "r", encoding="utf-8") as f:
+    with open(MONSTER_DB_FILE,"r",encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -92,11 +78,7 @@ def create_sample_monsters():
         json.dump(sample,f,ensure_ascii=False,indent=2)
 
 
-# ------------------------
-# ADD CREATURES
-# ------------------------
-
-def add_player(name, ac, hp):
+def add_player(name,ac,hp):
 
     creature = {
         "id":random.random(),
@@ -108,8 +90,6 @@ def add_player(name, ac, hp):
         "max_hp":hp,
         "conditions":[],
         "dead":False,
-        "death_success":0,
-        "death_fail":0,
         "statblock":None
     }
 
@@ -130,17 +110,11 @@ def add_monsters(monster,count):
             "max_hp":monster["hp"],
             "conditions":[],
             "dead":False,
-            "death_success":0,
-            "death_fail":0,
             "statblock":monster
         }
 
         st.session_state.creatures.append(creature)
 
-
-# ------------------------
-# COMBAT
-# ------------------------
 
 def start_combat():
 
@@ -162,10 +136,6 @@ def next_turn():
         st.session_state.round += 1
 
 
-# ------------------------
-# SAVE / LOAD
-# ------------------------
-
 def save_encounter():
 
     ensure_dirs()
@@ -183,10 +153,6 @@ def save_encounter():
     with open(path,"w",encoding="utf-8") as f:
         json.dump(data,f,ensure_ascii=False,indent=2)
 
-
-# ------------------------
-# STATBLOCK
-# ------------------------
 
 def show_statblock():
 
@@ -217,34 +183,6 @@ def show_statblock():
         for a in sb["actions"]:
             st.sidebar.write("-",a)
 
-
-# ------------------------
-# HP UPDATE
-# ------------------------
-
-def apply_hp_change(creature,value):
-
-    try:
-
-        if value.startswith("+"):
-            creature["hp"] += int(value)
-
-        elif value.startswith("-"):
-            creature["hp"] -= int(value)
-
-        else:
-            creature["hp"] = int(value)
-
-    except:
-        return
-
-    if creature["type"]=="monster" and creature["hp"]<=0:
-        creature["dead"]=True
-
-
-# ------------------------
-# UI
-# ------------------------
 
 def main():
 
@@ -303,7 +241,7 @@ def main():
 
     for i,c in enumerate(st.session_state.creatures):
 
-        col1,col2,col3,col4,col5 = st.columns([3,2,2,2,3])
+        col1,col2,col3,col4 = st.columns([3,2,2,3])
 
         active = (i == st.session_state.turn)
 
@@ -318,21 +256,15 @@ def main():
             key=f"init{i}"
         )
 
-        hp_val = col3.text_input(
-            "HP",
-            value=str(c["hp"]),
-            key=f"hp{i}"
-        )
-
-        apply_hp_change(c,hp_val)
+        col3.write(f"HP: {c['hp']} / {c['max_hp']}")
 
         if col4.button("Info",key=f"info{i}"):
 
             if c["statblock"]:
                 st.session_state.selected_statblock = c["statblock"]
 
-        c["conditions"] = col5.multiselect(
-            "Cond",
+        c["conditions"] = st.multiselect(
+            "Conditions",
             CONDITIONS,
             default=c["conditions"],
             key=f"cond{i}"
