@@ -2,6 +2,8 @@ import streamlit as st
 import json
 import os
 import random
+import requests
+from bs4 import BeautifulSoup
 from datetime import datetime
 
 MONSTER_DB_FILE = "monsters.json"
@@ -14,84 +16,13 @@ CONDITIONS = [
     "Без сознания","Истощение"
 ]
 
-# -------------------------
-# Utility
-# -------------------------
 
-def roll_dice(sides):
-    return random.randint(1, sides)
-
-def ensure_dirs():
-    if not os.path.exists(ENCOUNTER_DIR):
-        os.makedirs(ENCOUNTER_DIR)
-
-# -------------------------
-# Monster DB
-# -------------------------
-
-def load_monsters():
-    if not os.path.exists(MONSTER_DB_FILE):
-        create_sample_monsters()
-
-    with open(MONSTER_DB_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def create_sample_monsters():
-    sample = [
-        {
-            "name_ru": "Гоблин",
-            "name_en": "Goblin",
-            "ac": 15,
-            "hp": 7,
-            "max_hp": 7,
-            "cr": "1/4",
-            "speed": "30 ft",
-            "stats": {
-                "str":8,"dex":14,"con":10,"int":10,"wis":8,"cha":8
-            },
-            "traits":[
-                "Проворство гоблина: может выйти из боя бонусным действием."
-            ],
-            "actions":[
-                "Ятаган: +4 к попаданию, 1d6+2 рубящий."
-            ],
-            "bonus_actions":[],
-            "reactions":[],
-            "legendary_actions":[],
-            "spellcasting":""
-        },
-        {
-            "name_ru": "Орк",
-            "name_en": "Orc",
-            "ac": 13,
-            "hp": 15,
-            "max_hp": 15,
-            "cr": "1/2",
-            "speed": "30 ft",
-            "stats":{
-                "str":16,"dex":12,"con":16,"int":7,"wis":11,"cha":10
-            },
-            "traits":[
-                "Агрессивность: бонусным действием перемещается к врагу."
-            ],
-            "actions":[
-                "Топор: +5 к попаданию, 1d12+3 рубящий."
-            ],
-            "bonus_actions":[],
-            "reactions":[],
-            "legendary_actions":[],
-            "spellcasting":""
-        }
-    ]
-
-    with open(MONSTER_DB_FILE,"w",encoding="utf-8") as f:
-        json.dump(sample,f,ensure_ascii=False,indent=2)
-
-# -------------------------
-# Session State
-# -------------------------
+# ------------------------
+# INIT
+# ------------------------
 
 def init_session():
+
     if "creatures" not in st.session_state:
         st.session_state.creatures = []
 
@@ -104,17 +35,74 @@ def init_session():
     if "combat_started" not in st.session_state:
         st.session_state.combat_started = False
 
-# -------------------------
-# Creature creation
-# -------------------------
+    if "selected_statblock" not in st.session_state:
+        st.session_state.selected_statblock = None
 
-def add_player(name, ac, hp, initiative):
+
+# ------------------------
+# FILES
+# ------------------------
+
+def ensure_dirs():
+    if not os.path.exists(ENCOUNTER_DIR):
+        os.makedirs(ENCOUNTER_DIR)
+
+
+# ------------------------
+# MONSTER DB
+# ------------------------
+
+def load_monsters():
+
+    if not os.path.exists(MONSTER_DB_FILE):
+        create_sample_monsters()
+
+    with open(MONSTER_DB_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def create_sample_monsters():
+
+    sample = [
+        {
+            "name_ru":"Гоблин",
+            "name_en":"Goblin",
+            "ac":15,
+            "hp":7,
+            "speed":"30 ft",
+            "cr":"1/4",
+            "stats":{"str":8,"dex":14,"con":10,"int":10,"wis":8,"cha":8},
+            "traits":["Проворство гоблина"],
+            "actions":["Ятаган: +4 к попаданию, 1d6+2 рубящий"],
+        },
+        {
+            "name_ru":"Орк",
+            "name_en":"Orc",
+            "ac":13,
+            "hp":15,
+            "speed":"30 ft",
+            "cr":"1/2",
+            "stats":{"str":16,"dex":12,"con":16,"int":7,"wis":11,"cha":10},
+            "traits":["Агрессивность"],
+            "actions":["Топор: +5 к попаданию, 1d12+3 рубящий"],
+        }
+    ]
+
+    with open(MONSTER_DB_FILE,"w",encoding="utf-8") as f:
+        json.dump(sample,f,ensure_ascii=False,indent=2)
+
+
+# ------------------------
+# ADD CREATURES
+# ------------------------
+
+def add_player(name, ac, hp):
 
     creature = {
         "id":random.random(),
         "name":name,
         "type":"player",
-        "initiative":initiative,
+        "initiative":0,
         "ac":ac,
         "hp":hp,
         "max_hp":hp,
@@ -127,18 +115,19 @@ def add_player(name, ac, hp, initiative):
 
     st.session_state.creatures.append(creature)
 
-def add_monsters(monster,count,initiative):
+
+def add_monsters(monster,count):
 
     for i in range(count):
 
-        c = {
+        creature = {
             "id":random.random(),
             "name":f"{monster['name_ru']} {i+1}",
             "type":"monster",
-            "initiative":initiative,
+            "initiative":0,
             "ac":monster["ac"],
             "hp":monster["hp"],
-            "max_hp":monster["max_hp"],
+            "max_hp":monster["hp"],
             "conditions":[],
             "dead":False,
             "death_success":0,
@@ -146,11 +135,12 @@ def add_monsters(monster,count,initiative):
             "statblock":monster
         }
 
-        st.session_state.creatures.append(c)
+        st.session_state.creatures.append(creature)
 
-# -------------------------
-# Combat logic
-# -------------------------
+
+# ------------------------
+# COMBAT
+# ------------------------
 
 def start_combat():
 
@@ -172,9 +162,9 @@ def next_turn():
         st.session_state.round += 1
 
 
-# -------------------------
-# Save / Load
-# -------------------------
+# ------------------------
+# SAVE / LOAD
+# ------------------------
 
 def save_encounter():
 
@@ -193,87 +183,78 @@ def save_encounter():
     with open(path,"w",encoding="utf-8") as f:
         json.dump(data,f,ensure_ascii=False,indent=2)
 
-def load_encounter(file):
 
-    with open(file,"r",encoding="utf-8") as f:
-        data = json.load(f)
+# ------------------------
+# STATBLOCK
+# ------------------------
 
-    st.session_state.creatures = data["creatures"]
-    st.session_state.round = data["round"]
-    st.session_state.turn = data["turn"]
-    st.session_state.combat_started = True
+def show_statblock():
 
-# -------------------------
-# Sidebar
-# -------------------------
-
-def sidebar(monsters):
-
-    st.sidebar.title("🎲 Dice Roller")
-
-    for s in [20,12,10,8,6,4]:
-        if st.sidebar.button(f"Roll d{s}"):
-            st.sidebar.write("Result:", roll_dice(s))
-
-    st.sidebar.divider()
-
-    st.sidebar.title("📂 Load Encounter")
-
-    ensure_dirs()
-
-    files = os.listdir(ENCOUNTER_DIR)
-
-    for f in files:
-
-        if st.sidebar.button(f):
-            load_encounter(os.path.join(ENCOUNTER_DIR,f))
-
-# -------------------------
-# Statblock
-# -------------------------
-
-def show_statblock(creature):
-
-    sb = creature["statblock"]
+    sb = st.session_state.selected_statblock
 
     if not sb:
         return
 
-    st.sidebar.title(creature["name"])
+    st.sidebar.title(sb["name_ru"])
 
-    st.sidebar.write("AC:", sb["ac"])
-    st.sidebar.write("HP:", sb["hp"])
-    st.sidebar.write("Speed:", sb["speed"])
-    st.sidebar.write("CR:", sb["cr"])
+    st.sidebar.write(f"AC: {sb['ac']}")
+    st.sidebar.write(f"HP: {sb['hp']}")
+    st.sidebar.write(f"Speed: {sb['speed']}")
+    st.sidebar.write(f"CR: {sb['cr']}")
 
     st.sidebar.subheader("Stats")
 
     for k,v in sb["stats"].items():
-        st.sidebar.write(k.upper(),v)
+        st.sidebar.write(f"{k.upper()} : {v}")
 
-    if sb["traits"]:
+    if sb.get("traits"):
         st.sidebar.subheader("Traits")
         for t in sb["traits"]:
             st.sidebar.write("-",t)
 
-    if sb["actions"]:
+    if sb.get("actions"):
         st.sidebar.subheader("Actions")
         for a in sb["actions"]:
             st.sidebar.write("-",a)
 
-# -------------------------
+
+# ------------------------
+# HP UPDATE
+# ------------------------
+
+def apply_hp_change(creature,value):
+
+    try:
+
+        if value.startswith("+"):
+            creature["hp"] += int(value)
+
+        elif value.startswith("-"):
+            creature["hp"] -= int(value)
+
+        else:
+            creature["hp"] = int(value)
+
+    except:
+        return
+
+    if creature["type"]=="monster" and creature["hp"]<=0:
+        creature["dead"]=True
+
+
+# ------------------------
 # UI
-# -------------------------
+# ------------------------
 
 def main():
 
-    st.title("🐉 DM Assistant")
+    st.title("DM Assistant")
 
     init_session()
 
     monsters = load_monsters()
 
-    sidebar(monsters)
+    show_statblock()
 
     col1,col2 = st.columns(2)
 
@@ -284,10 +265,9 @@ def main():
         name = st.text_input("Name")
         ac = st.number_input("AC",0,30,10)
         hp = st.number_input("HP",1,300,10)
-        init = st.number_input("Initiative",-5,40,10)
 
         if st.button("Add Player"):
-            add_player(name,ac,hp,init)
+            add_player(name,ac,hp)
 
     with col2:
 
@@ -298,13 +278,12 @@ def main():
         choice = st.selectbox("Monster",names)
 
         count = st.number_input("Count",1,20,1)
-        init = st.number_input("Monster Initiative",-5,40,10)
 
         if st.button("Add Monster"):
 
             m = next(x for x in monsters if x["name_ru"]==choice)
 
-            add_monsters(m,count,init)
+            add_monsters(m,count)
 
     st.divider()
 
@@ -315,7 +294,7 @@ def main():
 
     else:
 
-        st.write("Round:",st.session_state.round)
+        st.write(f"Round: {st.session_state.round}")
 
         if st.button("Next Turn"):
             next_turn()
@@ -324,51 +303,40 @@ def main():
 
     for i,c in enumerate(st.session_state.creatures):
 
-        col1,col2,col3,col4,col5 = st.columns([2,1,2,2,2])
+        col1,col2,col3,col4,col5 = st.columns([3,2,2,2,3])
 
         active = (i == st.session_state.turn)
 
         if active:
-            col1.markdown(f"**➡ {c['name']}**")
+            col1.markdown(f"➡ **{c['name']}**")
         else:
             col1.write(c["name"])
 
-        col2.write("Init:",c["initiative"])
-
-        hp_change = col3.text_input(
-            f"hp{i}",
-            value=f"{c['hp']}/{c['max_hp']}"
+        c["initiative"] = col2.number_input(
+            "Init",
+            value=c["initiative"],
+            key=f"init{i}"
         )
 
-        if col4.button("Select",key=f"s{i}"):
-            show_statblock(c)
+        hp_val = col3.text_input(
+            "HP",
+            value=str(c["hp"]),
+            key=f"hp{i}"
+        )
 
-        cond = col5.multiselect(
-            "Conditions",
+        apply_hp_change(c,hp_val)
+
+        if col4.button("Info",key=f"info{i}"):
+
+            if c["statblock"]:
+                st.session_state.selected_statblock = c["statblock"]
+
+        c["conditions"] = col5.multiselect(
+            "Cond",
             CONDITIONS,
             default=c["conditions"],
             key=f"cond{i}"
         )
-
-        c["conditions"] = cond
-
-        if c["type"]=="player" and c["hp"]<=0:
-
-            s1,s2 = st.columns(2)
-
-            if s1.button("Success",key=f"succ{i}"):
-
-                c["death_success"]+=1
-
-                if c["death_success"]>=3:
-                    c["hp"]=1
-
-            if s2.button("Fail",key=f"fail{i}"):
-
-                c["death_fail"]+=1
-
-                if c["death_fail"]>=3:
-                    c["dead"]=True
 
     st.divider()
 
