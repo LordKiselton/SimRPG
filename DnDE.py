@@ -1,249 +1,274 @@
 import streamlit as st
 import json
-import pandas as pd
-import uuid
+import os
+import random
+from datetime import datetime
 
-st.set_page_config(layout="wide")
+# -----------------------------
+# Настройки
+# -----------------------------
+MONSTER_DB_FILE = "monsters.json"
+ENCOUNTER_DIR = "encounters"
 
-# ---------- LOAD MONSTER DB ----------
-
-@st.cache_data
-def load_monsters():
-    with open("DnD.json", "r", encoding="utf-8") as f:
-        return json.load(f)
-
-monster_db = load_monsters()
-
-monster_names = [m["name"] for m in monster_db]
-
-
-# ---------- SESSION STATE ----------
-
-if "combatants" not in st.session_state:
-    st.session_state.combatants = []
-
-if "encounter_started" not in st.session_state:
-    st.session_state.encounter_started = False
-
-if "turn_index" not in st.session_state:
-    st.session_state.turn_index = 0
-
-
-# ---------- CONDITIONS ----------
-
-conditions = [
-"Ослеплён",
-"Очарован",
-"Оглушён",
-"Испуган",
-"Схвачен",
-"Недееспособен",
-"Невидим",
-"Парализован",
-"Окаменел",
-"Отравлен",
-"Сбит с ног",
-"Опутан",
-"Ошеломлён"
+CONDITIONS = [
+    "Ослеплён","Очарован","Оглох","Испуган","Схвачен",
+    "Недееспособен","Невидим","Парализован","Окаменел",
+    "Отравлен","Сбит с ног","Скован","Оглушён",
+    "Без сознания","Истощение"
 ]
 
+HP_ADJUST = [-5, -1, +1, +5]  # кнопки изменения HP
 
-# ---------- FUNCTIONS ----------
+# -----------------------------
+# Инициализация сессии
+# -----------------------------
+def init_session():
+    if "creatures" not in st.session_state:
+        st.session_state.creatures=[]
+    if "round" not in st.session_state:
+        st.session_state.round=1
+    if "turn" not in st.session_state:
+        st.session_state.turn=0
+    if "combat_started" not in st.session_state:
+        st.session_state.combat_started=False
+    if "selected_statblock" not in st.session_state:
+        st.session_state.selected_statblock=None
 
-def add_combatant(name, hp, ac, type_, monster_data=None):
+# -----------------------------
+# Загрузка / создание базы монстров
+# -----------------------------
+def create_sample_monsters():
+    sample=[
+        {
+            "name_ru":"Гоблин",
+            "name_en":"Goblin",
+            "ac":15,
+            "hp":7,
+            "speed":"30 ft",
+            "cr":"1/4",
+            "stats":{"str":8,"dex":14,"con":10,"int":10,"wis":8,"cha":8},
+            "traits":["Проворство гоблина"],
+            "actions":["Ятаган: +4 к попаданию, 1d6+2 рубящий"],
+            "bonus_actions":[],"reactions":[],"legendary_actions":[],"lair_actions":[],"regional_effects":[],"spellcasting":""
+        },
+        {
+            "name_ru":"Орк",
+            "name_en":"Orc",
+            "ac":13,
+            "hp":15,
+            "speed":"30 ft",
+            "cr":"1/2",
+            "stats":{"str":16,"dex":12,"con":16,"int":7,"wis":11,"cha":10},
+            "traits":["Агрессивность"],
+            "actions":["Топор: +5 к попаданию, 1d12+3 рубящий"],
+            "bonus_actions":[],"reactions":[],"legendary_actions":[],"lair_actions":[],"regional_effects":[],"spellcasting":""
+        }
+    ]
+    with open(MONSTER_DB_FILE,"w",encoding="utf-8") as f:
+        json.dump(sample,f,ensure_ascii=False,indent=2)
 
-    st.session_state.combatants.append({
-        "id": str(uuid.uuid4()),
-        "name": name,
-        "hp": hp,
-        "max_hp": hp,
-        "ac": ac,
-        "initiative": 0,
-        "type": type_,
-        "conditions": [],
-        "alive": True,
-        "monster_data": monster_data
+def load_monsters():
+    if not os.path.exists(MONSTER_DB_FILE):
+        create_sample_monsters()
+    with open(MONSTER_DB_FILE,"r",encoding="utf-8") as f:
+        return json.load(f)
+
+# -----------------------------
+# Добавление существ
+# -----------------------------
+def add_player(name,ac,hp):
+    st.session_state.creatures.append({
+        "id":random.random(),
+        "name":name,
+        "type":"player",
+        "initiative":0,
+        "ac":ac,
+        "hp":hp,
+        "max_hp":hp,
+        "conditions":[],
+        "dead":False,
+        "statblock":None
     })
 
+def add_monsters(monster,count):
+    for i in range(count):
+        st.session_state.creatures.append({
+            "id":random.random(),
+            "name":f"{monster['name_ru']} {i+1}",
+            "type":"monster",
+            "initiative":0,
+            "ac":monster["ac"],
+            "hp":monster["hp"],
+            "max_hp":monster["hp"],
+            "conditions":[],
+            "dead":False,
+            "statblock":monster
+        })
 
-def sort_initiative():
-    st.session_state.combatants = sorted(
-        st.session_state.combatants,
-        key=lambda x: x["initiative"],
-        reverse=True
-    )
-
+# -----------------------------
+# Combat
+# -----------------------------
+def start_combat():
+    st.session_state.creatures.sort(key=lambda x: x["initiative"],reverse=True)
+    st.session_state.turn=0
+    st.session_state.round=1
+    st.session_state.combat_started=True
 
 def next_turn():
-    st.session_state.turn_index += 1
-    if st.session_state.turn_index >= len(st.session_state.combatants):
-        st.session_state.turn_index = 0
+    st.session_state.turn+=1
+    if st.session_state.turn>=len(st.session_state.creatures):
+        st.session_state.turn=0
+        st.session_state.round+=1
 
+# -----------------------------
+# HP управление
+# -----------------------------
+def change_hp(creature,value):
+    try:
+        creature["hp"]+=value
+    except:
+        return
+    if creature["hp"]>creature["max_hp"]:
+        creature["hp"]=creature["max_hp"]
+    if creature["hp"]<=0:
+        creature["hp"]=0
+        if creature["type"]=="monster":
+            creature["dead"]=True
 
-# ---------- ENCOUNTER SETUP ----------
+# -----------------------------
+# Statblock Sidebar
+# -----------------------------
+def show_statblock():
+    sb=st.session_state.selected_statblock
+    if not sb:
+        return
+    md=""
+    md+=f"### {sb['name_ru']}\n"
+    md+=f"**AC**: {sb['ac']}  \n"
+    md+=f"**HP**: {sb['hp']}  \n"
+    md+=f"**Speed**: {sb['speed']}  \n"
+    md+=f"**CR**: {sb['cr']}  \n\n"
+    md+="**Stats**  \n"
+    stats_line=" | ".join([f"{k.upper()} {v}" for k,v in sb["stats"].items()])
+    md+=stats_line+"\n\n"
+    if sb.get("traits"):
+        md+="**Traits**  \n"
+        for t in sb["traits"]:
+            md+="- "+t+"  \n"
+    if sb.get("actions"):
+        md+="**Actions**  \n"
+        for a in sb["actions"]:
+            md+="- "+a+"  \n"
+    if sb.get("bonus_actions"):
+        md+="**Bonus Actions**  \n"
+        for a in sb["bonus_actions"]:
+            md+="- "+a+"  \n"
+    if sb.get("reactions"):
+        md+="**Reactions**  \n"
+        for a in sb["reactions"]:
+            md+="- "+a+"  \n"
+    if sb.get("legendary_actions"):
+        md+="**Legendary Actions**  \n"
+        for a in sb["legendary_actions"]:
+            md+="- "+a+"  \n"
+    if sb.get("spellcasting"):
+        md+="**Spellcasting**  \n"+sb["spellcasting"]+"  \n"
+    st.sidebar.markdown(md)
 
-if not st.session_state.encounter_started:
+# -----------------------------
+# Save / Load
+# -----------------------------
+def ensure_dirs():
+    if not os.path.exists(ENCOUNTER_DIR):
+        os.makedirs(ENCOUNTER_DIR)
 
-    st.title("DnD Encounter Builder")
+def save_encounter():
+    ensure_dirs()
+    name=datetime.now().strftime("battle_%Y%m%d_%H%M%S.json")
+    data={"creatures":st.session_state.creatures,"round":st.session_state.round,"turn":st.session_state.turn}
+    path=os.path.join(ENCOUNTER_DIR,name)
+    with open(path,"w",encoding="utf-8") as f:
+        json.dump(data,f,ensure_ascii=False,indent=2)
 
-    col1, col2, col3 = st.columns(3)
+def load_encounter(file):
+    with open(file,"r",encoding="utf-8") as f:
+        data=json.load(f)
+    st.session_state.creatures=data["creatures"]
+    st.session_state.round=data["round"]
+    st.session_state.turn=data["turn"]
+    st.session_state.combat_started=True
 
-    # HERO
+# -----------------------------
+# MAIN UI
+# -----------------------------
+def main():
+    st.title("DM Assistant - Compact Battle Table")
+    init_session()
+    monsters=load_monsters()
+    show_statblock()
+
+    col1,col2=st.columns(2)
     with col1:
-
-        st.header("Герой")
-
-        name = st.text_input("Имя героя")
-
-        hp = st.number_input("HP", 1, 999, 10)
-
-        ac = st.number_input("AC", 1, 30, 10)
-
-        if st.button("Добавить героя"):
-            add_combatant(name, hp, ac, "hero")
-
-    # NPC
+        st.subheader("Add Player")
+        name=st.text_input("Name")
+        ac=st.number_input("AC",0,30,10)
+        hp=st.number_input("HP",1,300,10)
+        if st.button("Add Player"):
+            add_player(name,ac,hp)
     with col2:
-
-        st.header("NPC")
-
-        name = st.text_input("Имя NPC")
-
-        hp = st.number_input("HP NPC", 1, 999, 10)
-
-        ac = st.number_input("AC NPC", 1, 30, 10)
-
-        if st.button("Добавить NPC"):
-            add_combatant(name, hp, ac, "npc")
-
-    # MONSTER
-    with col3:
-
-        st.header("Монстр")
-
-        monster_name = st.selectbox("Монстр", monster_names)
-
-        monster = next(m for m in monster_db if m["name"] == monster_name)
-
-        st.write("AC:", monster["Armor Class"])
-        st.write("HP:", monster["Hit Points"])
-
-        if st.button("Добавить монстра"):
-            add_combatant(
-                monster["name"],
-                int(monster["Hit Points"].split()[0]),
-                monster["Armor Class"],
-                "monster",
-                monster
-            )
+        st.subheader("Add Monster")
+        names=[m["name_ru"] for m in monsters]
+        choice=st.selectbox("Monster",names)
+        count=st.number_input("Count",1,20,1)
+        if st.button("Add Monster"):
+            m=next(x for x in monsters if x["name_ru"]==choice)
+            add_monsters(m,int(count))
 
     st.divider()
 
-    if st.session_state.combatants:
-
-        st.subheader("Участники")
-
-        df = pd.DataFrame(st.session_state.combatants)
-        st.dataframe(df[["name","type","hp","ac"]])
-
-        if st.button("Начать бой"):
-            st.session_state.encounter_started = True
-            st.rerun()
-
-
-# ---------- COMBAT SCREEN ----------
-
-else:
-
-    st.title("⚔ Encounter")
-
-    if st.button("End Encounter"):
-        st.session_state.combatants = []
-        st.session_state.turn_index = 0
-        st.session_state.encounter_started = False
-        st.rerun()
-
-    if st.button("Sort Initiative"):
-        sort_initiative()
-
-    if st.button("Next Turn"):
-        next_turn()
+    if not st.session_state.combat_started:
+        if st.button("START COMBAT"):
+            start_combat()
+    else:
+        st.write(f"**Round:** {st.session_state.round}")
+        if st.button("Next Turn"):
+            next_turn()
 
     st.divider()
+    # -------- Battle Table --------
+    for i,c in enumerate(st.session_state.creatures):
+        # компактные колонки
+        bg_color = "#d3f9d8" if i==st.session_state.turn else None
+        col_name,col_init,col_ac,col_hp,col_cond,col_info=st.columns([3,1,1,3,3,1])
+        if bg_color:
+            col_name.markdown(f"<div style='background-color:{bg_color}'>{c['name']}</div>",unsafe_allow_html=True)
+        else:
+            col_name.write(c["name"])
+        c["initiative"]=col_init.number_input("",value=c["initiative"],key=f"init{i}",label_visibility="collapsed")
+        col_ac.write(f"{c['ac']}")
+        # HP кнопки
+        hp_col1,hp_col2,hp_col3,hp_col4,hp_display=col_hp.columns([1,1,1,1,2])
+        for j,val in enumerate(HP_ADJUST):
+            if hp_col1.button(f"{val}",key=f"hpbtn{i}_{j}"):
+                change_hp(c,val)
+        hp_display.write(f"{c['hp']} / {c['max_hp']}")
+        # Conditions
+        c["conditions"]=col_cond.multiselect("",CONDITIONS,default=c["conditions"],key=f"cond{i}",label_visibility="collapsed")
+        # Info
+        if col_info.button("Info",key=f"info{i}"):
+            if c["statblock"]:
+                st.session_state.selected_statblock=c["statblock"]
 
-    for i, c in enumerate(st.session_state.combatants):
+    st.divider()
+    # Save / Load
+    st.subheader("Save / Load Encounter")
+    if st.button("Save Encounter"):
+        save_encounter()
+    ensure_dirs()
+    files=os.listdir(ENCOUNTER_DIR)
+    for f in files:
+        if st.button(f"Load {f}"):
+            load_encounter(os.path.join(ENCOUNTER_DIR,f))
 
-        highlight = i == st.session_state.turn_index
-
-        box = st.container(border=True)
-
-        with box:
-
-            if highlight:
-                st.markdown(f"### ▶ {c['name']}")
-            else:
-                st.markdown(f"### {c['name']}")
-
-            col1, col2, col3, col4 = st.columns(4)
-
-            with col1:
-                c["initiative"] = st.number_input(
-                    "Init",
-                    key=f"init_{c['id']}",
-                    value=c["initiative"]
-                )
-
-            with col2:
-
-                hp_change = st.number_input(
-                    "HP change",
-                    key=f"hp_{c['id']}",
-                    value=0
-                )
-
-                if st.button("Apply", key=f"apply_{c['id']}"):
-
-                    c["hp"] += hp_change
-
-                    if c["hp"] <= 0:
-                        c["alive"] = False
-                        c["hp"] = 0
-
-            with col3:
-
-                c["conditions"] = st.multiselect(
-                    "Conditions",
-                    conditions,
-                    default=c["conditions"],
-                    key=f"cond_{c['id']}"
-                )
-
-            with col4:
-
-                st.write("AC:", c["ac"])
-                st.write("HP:", f"{c['hp']} / {c['max_hp']}")
-
-                if not c["alive"]:
-                    st.error("DEAD")
-
-            # MONSTER STATBLOCK
-
-            if c["type"] == "monster":
-
-                with st.expander("Статблок"):
-
-                    m = c["monster_data"]
-
-                    st.write("AC:", m["Armor Class"])
-                    st.write("HP:", m["Hit Points"])
-                    st.write("Speed:", m["Speed"])
-
-                    st.subheader("Traits")
-                    st.write(m["Traits"])
-
-                    st.subheader("Actions")
-                    st.write(m["Actions"])
-
-                    if m["Legendary Actions"]:
-                        st.subheader("Legendary Actions")
-                        st.write(m["Legendary Actions"])
+if __name__=="__main__":
+    main()
