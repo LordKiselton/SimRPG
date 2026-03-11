@@ -1,605 +1,324 @@
-import math
-import random
-from dataclasses import dataclass
-from typing import List, Tuple, Set, Dict, Optional
-
-import numpy as np
-import pandas as pd
 import streamlit as st
+import numpy as np
 import matplotlib.pyplot as plt
 
+# -----------------------------
+# Helpers
+# -----------------------------
+def rng_from_seed(seed: int):
+    return np.random.default_rng(seed)
 
-# =========================
-# Core geometry / metrics
-# =========================
+def clamp_int(x, lo, hi):
+    return int(max(lo, min(hi, x)))
 
-@dataclass(frozen=True)
-class Base:
-    id: int
-    x: int
-    y: int
+def euclid(a, b):
+    return float(np.hypot(a[0] - b[0], a[1] - b[1]))
 
+def manhattan(a, b):
+    return float(abs(a[0] - b[0]) + abs(a[1] - b[1]))
 
-def dist(a: Base, b: Base, metric: str) -> float:
-    dx = a.x - b.x
-    dy = a.y - b.y
-    if metric == "Манхэттен":
-        return abs(dx) + abs(dy)
-    return math.hypot(dx, dy)
+def get_distance_fn(metric: str):
+    return euclid if metric == "Euclidean" else manhattan
 
+def in_bounds(p, W, H):
+    return 0 <= p[0] < W and 0 <= p[1] < H
 
-def score_sum_distances(bases: List[Base], metric: str) -> List[float]:
-    """Текущий алгоритм: сумма дистанций до всех остальных."""
-    n = len(bases)
-    scores = [0.0] * n
-    for i in range(n):
-        s = 0.0
-        for j in range(n):
-            if i == j:
-                continue
-            s += dist(bases[i], bases[j], metric)
-        scores[i] = s
-    return scores
-
-
-def pick_best_base_global(bases: List[Base], metric: str) -> Tuple[Base, pd.DataFrame]:
-    """Текущий алгоритм (глобальный медоид): выбираем базу с минимальной суммой дистанций до всех."""
-    scores = score_sum_distances(bases, metric)
-    df = pd.DataFrame({
-        "id": [b.id for b in bases],
-        "x": [b.x for b in bases],
-        "y": [b.y for b in bases],
-        "Сумма дистанций S_i": scores,
-    }).sort_values("Сумма дистанций S_i", ascending=True).reset_index(drop=True)
-    best_id = int(df.loc[0, "id"])
-    best = next(b for b in bases if b.id == best_id)
-    return best, df
-
-
-# =========================
-# Clustering (graph components)
-# =========================
-
-def k3_median_distance(bases: List[Base], metric: str) -> float:
-    """
-    Авто-оценка 'типичной близости':
-    берём дистанцию до 3-го ближайшего соседа для каждой базы,
-    возвращаем медиану.
-    """
-    n = len(bases)
-    if n <= 3:
-        return 1.0
-    third = []
-    for i in range(n):
-        ds = []
-        for j in range(n):
-            if i == j:
-                continue
-            ds.append(dist(bases[i], bases[j], metric))
-        ds.sort()
-        # 3-й ближайший -> index 2
-        third.append(ds[min(2, len(ds) - 1)])
-    m = float(np.median(third))
-    return max(1.0, m)
-
-
-def build_clusters_components(
-    bases: List[Base],
-    metric: str,
-    link_radius: float,
-) -> List[List[int]]:
-    """
-    Кластеризация через компоненты связности:
-    соединяем i-j, если dist(i,j) <= link_radius.
-    """
-    n = len(bases)
-    if n == 0:
-        return []
-    adj: List[List[int]] = [[] for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1, n):
-            if dist(bases[i], bases[j], metric) <= link_radius:
-                adj[i].append(j)
-                adj[j].append(i)
-
-    seen = [False] * n
-    clusters: List[List[int]] = []
-    for i in range(n):
-        if seen[i]:
-            continue
-        # BFS/DFS
-        stack = [i]
-        seen[i] = True
-        comp = []
-        while stack:
-            v = stack.pop()
-            comp.append(v)
-            for u in adj[v]:
-                if not seen[u]:
-                    seen[u] = True
-                    stack.append(u)
-        clusters.append(sorted(comp))
-    # для стабильности — сортируем кластеры по размеру убыв., потом по min id
-    clusters.sort(key=lambda c: (-len(c), min(c)))
-    return clusters
-
-
-def pick_cluster(
-    bases: List[Base],
-    clusters: List[List[int]],
-    pick_mode: str,
-) -> int:
-    """
-    Возвращает индекс кластера в списке clusters.
-    - 'Самый большой': max size
-    - 'Самый плотный': max средняя внутренняя степень (упрощённо)
-    """
-    if not clusters:
-        return 0
-    if pick_mode == "Самый большой":
-        return 0
-
-    # Самый плотный (простая эвристика):
-    # плотность ~ average pairwise distance inversed (меньше -> плотнее)
-    best_idx = 0
-    best_score = None
-    for idx, comp in enumerate(clusters):
-        if len(comp) <= 1:
-            score = -1e9
-        else:
-            # средняя дистанция внутри кластера (меньше = лучше)
-            ds = []
-            for a_i in range(len(comp)):
-                for b_i in range(a_i + 1, len(comp)):
-                    a = bases[comp[a_i]]
-                    b = bases[comp[b_i]]
-                    ds.append(dist(a, b, metric_global_for_density))
-            score = -float(np.mean(ds))  # максимизируем -mean
-        if best_score is None or score > best_score:
-            best_score = score
-            best_idx = idx
-    return best_idx
-
-
-def score_within_subset(bases: List[Base], subset_idx: List[int], metric: str) -> Dict[int, float]:
-    """Сумма дистанций, но только внутри subset."""
-    scores: Dict[int, float] = {}
-    for ii in subset_idx:
-        s = 0.0
-        for jj in subset_idx:
-            if ii == jj:
-                continue
-            s += dist(bases[ii], bases[jj], metric)
-        scores[ii] = s
-    return scores
-
-
-def pick_best_base_clustered(
-    bases: List[Base],
-    metric: str,
-    link_radius: float,
-    cluster_pick_mode: str,
-) -> Tuple[Base, pd.DataFrame, List[List[int]], int]:
-    """
-    Новый алгоритм:
-    1) режем на кластеры (компоненты связности по link_radius)
-    2) выбираем один кластер (обычно крупнейший)
-    3) внутри кластера выбираем медоид (минимальная сумма дистанций внутри кластера)
-    """
-    clusters = build_clusters_components(bases, metric, link_radius)
-    chosen_cluster_idx = 0
-    if clusters:
-        # "Самый плотный" требует metric внутри функции — чуть костыльно, но прозрачно
-        global metric_global_for_density
-        metric_global_for_density = metric
-        if cluster_pick_mode == "Самый большой":
-            chosen_cluster_idx = 0
-        else:
-            # пересчёт плотности внутри здесь (чтобы без лишних параметров в pick_cluster)
-            best_idx = 0
-            best_score = None
-            for idx, comp in enumerate(clusters):
-                if len(comp) <= 1:
-                    score = -1e9
-                else:
-                    ds = []
-                    for a_i in range(len(comp)):
-                        for b_i in range(a_i + 1, len(comp)):
-                            a = bases[comp[a_i]]
-                            b = bases[comp[b_i]]
-                            ds.append(dist(a, b, metric))
-                    score = -float(np.mean(ds))  # меньше средняя дистанция -> выше score
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_idx = idx
-            chosen_cluster_idx = best_idx
-
-    chosen = clusters[chosen_cluster_idx] if clusters else list(range(len(bases)))
-    scores_in = score_within_subset(bases, chosen, metric)
-
-    # Для таблицы: покажем и глобальный скор, и скор внутри кластера
-    global_scores = score_sum_distances(bases, metric)
-    cluster_id_of = {}
-    for cid, comp in enumerate(clusters):
-        for ii in comp:
-            cluster_id_of[ii] = cid
-
-    rows = []
-    for idx, b in enumerate(bases):
-        rows.append({
-            "id": b.id,
-            "x": b.x,
-            "y": b.y,
-            "cluster": cluster_id_of.get(idx, -1),
-            "cluster_size": len(clusters[cluster_id_of[idx]]) if idx in cluster_id_of else 0,
-            "S_global": global_scores[idx],
-            "S_in_cluster": scores_in.get(idx, np.nan),
-            "В выбранном кластере": (idx in chosen),
-        })
-    df = pd.DataFrame(rows)
-
-    # Ранжируем по S_in_cluster (только для выбранного кластера), иначе вверх не тянем
-    df_rank = df[df["В выбранном кластере"]].copy()
-    df_rank = df_rank.sort_values("S_in_cluster", ascending=True).reset_index(drop=True)
-
-    # лучший — минимальный S_in_cluster
-    best_id = int(df_rank.loc[0, "id"])
-    best = next(b for b in bases if b.id == best_id)
-
-    return best, df, clusters, chosen_cluster_idx
-
-
-# =========================
-# Teleport zone
-# =========================
-
-def cells_in_radius(cx, cy, R, shape, w, h):
-    res = []
-    x0 = max(0, cx - R)
-    x1 = min(w - 1, cx + R)
-    y0 = max(0, cy - R)
-    y1 = min(h - 1, cy + R)
-
-    r2 = R * R
+def circle_points(center, r, W, H):
+    # All points with distance <= r in grid (cheaper than perfect circle: use squared euclid)
+    cx, cy = center
+    pts = []
+    r2 = r * r
+    x0 = max(0, cx - r)
+    x1 = min(W - 1, cx + r)
+    y0 = max(0, cy - r)
+    y1 = min(H - 1, cy + r)
     for x in range(x0, x1 + 1):
         dx = x - cx
         for y in range(y0, y1 + 1):
             dy = y - cy
-            if shape == "Круг":
-                if dx * dx + dy * dy <= r2:
-                    res.append((x, y))
-            elif shape == "Ромб":
-                if abs(dx) + abs(dy) <= R:
-                    res.append((x, y))
-            else:
-                if max(abs(dx), abs(dy)) <= R:
-                    res.append((x, y))
-    return res
+            if dx * dx + dy * dy <= r2:
+                pts.append((x, y))
+    return pts
 
+def sample_free_cells(rng, W, H, occupied_set, n):
+    free = [(x, y) for x in range(W) for y in range(H) if (x, y) not in occupied_set]
+    if n > len(free):
+        n = len(free)
+    if n <= 0:
+        return []
+    idx = rng.choice(len(free), size=n, replace=False)
+    return [free[i] for i in idx]
 
-def teleport_players(best, occupied, blocked, w, h, R, shape, n_players, seed, unique):
-    rng = random.Random(seed)
-    candidates = cells_in_radius(best.x, best.y, R, shape, w, h)
-    forbidden = occupied | blocked
-    free = [c for c in candidates if c not in forbidden]
-    rng.shuffle(free)
+def place_obstacles(rng, W, H, obstacle_ratio, occupied):
+    n_obs = int(W * H * obstacle_ratio)
+    obs = sample_free_cells(rng, W, H, occupied, n_obs)
+    for p in obs:
+        occupied.add(p)
+    return obs
 
-    teleports = []
-    fails = 0
-    used = set()
+def place_points_random(rng, W, H, count, occupied):
+    pts = sample_free_cells(rng, W, H, occupied, count)
+    for p in pts:
+        occupied.add(p)
+    return pts
 
-    for _ in range(n_players):
-        if not free:
-            fails += 1
-            continue
-        if unique:
-            pick = None
-            while free:
-                c = free.pop()
-                if c not in used:
-                    pick = c
-                    used.add(c)
-                    break
-            if pick:
-                teleports.append(pick)
-            else:
-                fails += 1
-        else:
-            teleports.append(rng.choice(free))
-
-    return {
-        "teleports": teleports,
-        "fails": fails,
-        "candidate_count": len(candidates),
-        "free_count": len(free),
-    }
-
-
-# =========================
-# Base generation
-# =========================
-
-def gen_uniform(w, h, n, seed, used):
-    rng = random.Random(seed)
-    bases = []
-    while len(bases) < n:
-        x = rng.randrange(w)
-        y = rng.randrange(h)
-        if (x, y) in used:
-            continue
-        used.add((x, y))
-        bases.append(Base(len(bases), x, y))
-    return bases
-
-
-def gen_cluster(w, h, n, seed, spread, used):
-    rng = random.Random(seed)
-    cx = rng.randrange(w)
-    cy = rng.randrange(h)
-    bases = []
-    while len(bases) < n:
-        x = int(round(rng.gauss(cx, spread)))
-        y = int(round(rng.gauss(cy, spread)))
-        if not (0 <= x < w and 0 <= y < h):
-            continue
-        if (x, y) in used:
-            continue
-        used.add((x, y))
-        bases.append(Base(len(bases), x, y))
-    return bases
-
-
-def gen_multi_clusters(w, h, n, seed, k, spread, min_sep, used):
-    """
-    Генерация K кластеров:
-    - выбираем K центров так, чтобы они были не слишком близко друг к другу (min_sep)
-    - распределяем n баз по кластерам (почти равномерно)
-    """
-    rng = random.Random(seed)
-
-    # 1) центры
-    centers: List[Tuple[int, int]] = []
+def place_points_cluster(rng, W, H, count, occupied, spread):
+    # one cluster around random center
+    center = (int(rng.integers(0, W)), int(rng.integers(0, H)))
+    pts = []
     tries = 0
-    while len(centers) < k and tries < 50_000:
+    while len(pts) < count and tries < count * 200:
         tries += 1
-        cx = rng.randrange(w)
-        cy = rng.randrange(h)
-        ok = True
-        for (px, py) in centers:
-            if math.hypot(cx - px, cy - py) < min_sep:
-                ok = False
-                break
-        if ok:
-            centers.append((cx, cy))
-    if len(centers) < k:
-        # если не смогли разнести — просто добьём без min_sep
-        while len(centers) < k:
-            centers.append((rng.randrange(w), rng.randrange(h)))
+        x = int(np.round(rng.normal(center[0], spread)))
+        y = int(np.round(rng.normal(center[1], spread)))
+        p = (x, y)
+        if in_bounds(p, W, H) and p not in occupied:
+            pts.append(p)
+            occupied.add(p)
+    # fallback random if not enough
+    if len(pts) < count:
+        pts += place_points_random(rng, W, H, count - len(pts), occupied)
+    return pts
 
-    # 2) размеры кластеров
-    base_counts = [n // k] * k
-    for i in range(n % k):
-        base_counts[i] += 1
-    rng.shuffle(base_counts)
+def place_points_kclusters(rng, W, H, count, occupied, k, spread):
+    k = max(1, k)
+    centers = [(int(rng.integers(0, W)), int(rng.integers(0, H))) for _ in range(k)]
+    pts = []
+    tries = 0
+    while len(pts) < count and tries < count * 300:
+        tries += 1
+        c = centers[int(rng.integers(0, k))]
+        x = int(np.round(rng.normal(c[0], spread)))
+        y = int(np.round(rng.normal(c[1], spread)))
+        p = (x, y)
+        if in_bounds(p, W, H) and p not in occupied:
+            pts.append(p)
+            occupied.add(p)
+    if len(pts) < count:
+        pts += place_points_random(rng, W, H, count - len(pts), occupied)
+    return pts
 
-    # 3) генерим
-    bases: List[Base] = []
-    for ci, cnt in enumerate(base_counts):
-        cx, cy = centers[ci]
-        made = 0
-        guard = 0
-        while made < cnt and guard < 200_000:
-            guard += 1
-            x = int(round(rng.gauss(cx, spread)))
-            y = int(round(rng.gauss(cy, spread)))
-            if not (0 <= x < w and 0 <= y < h):
+def compute_entry_base(enemy_bases, active_mask, own_players, dist_fn):
+    # enemy_bases: list[(x,y)]
+    # active_mask: bool array same length
+    active_pts = [p for p, a in zip(enemy_bases, active_mask) if a]
+    if len(active_pts) == 0:
+        return None, None, None
+
+    N1 = len(active_pts)
+    N2 = int(own_players)
+
+    # N = min(N1, max(4, floor(sqrt(2*N2))))
+    N = min(N1, max(4, int(np.floor(np.sqrt(2 * max(1, N2))))))
+
+    # For each base compute weighted sum of distances to N nearest (including itself? — исключим себя)
+    scores = []
+    details = []
+    for j, pj in enumerate(active_pts):
+        dists = []
+        for i, pi in enumerate(active_pts):
+            if i == j:
                 continue
-            if (x, y) in used:
-                continue
-            used.add((x, y))
-            bases.append(Base(len(bases), x, y))
-            made += 1
-
-    # если из-за коллизий/границ не добили — докидываем равномерно
-    while len(bases) < n:
-        x = rng.randrange(w)
-        y = rng.randrange(h)
-        if (x, y) in used:
+            dists.append(dist_fn(pj, pi))
+        if len(dists) == 0:
+            # only one active base
+            scores.append(0.0)
+            details.append((N, [], 1.0))
             continue
-        used.add((x, y))
-        bases.append(Base(len(bases), x, y))
 
-    return bases, centers
+        dists_sorted = np.sort(np.array(dists, dtype=float))
+        n_take = min(N, len(dists_sorted))
+        nearest = dists_sorted[:n_take]
 
+        # K = median(d1..dN)
+        K = float(np.median(nearest)) if n_take > 0 else 1.0
+        if K <= 1e-9:
+            K = 1.0  # protect from divide by zero in ultra-dense / duplicates
 
-# =========================
+        weights = np.exp(-nearest / K)
+        S = float(np.sum(nearest * weights))
+        scores.append(S)
+        details.append((N, nearest.tolist(), K))
+
+    idx = int(np.argmin(scores))
+    return active_pts[idx], float(scores[idx]), {"N": N, "scores": scores, "details": details, "active_pts": active_pts}
+
+def pick_teleport_cell(rng, entry_base, W, H, occupied, start_radius, max_extra=200):
+    r = start_radius
+    # find any free cell within radius; if none expand radius by 1
+    for _ in range(max_extra):
+        candidates = circle_points(entry_base, r, W, H)
+        free = [p for p in candidates if p not in occupied]
+        if free:
+            return free[int(rng.integers(0, len(free)))], r
+        r += 1
+    return None, None
+
+# -----------------------------
 # UI
-# =========================
+# -----------------------------
+st.set_page_config(page_title="Teleport Entry Selector Simulator", layout="wide")
+st.title("Симуляция выбора точки входа при телепорте (PvP)")
 
-st.set_page_config(page_title="VS: Точка входа телепорта", layout="wide")
-st.title("VS: Прототип точки входа телепорта")
+with st.sidebar:
+    st.header("Параметры (минимум)")
+    seed = st.number_input("Seed", min_value=0, value=42, step=1)
+    W = st.slider("Ширина карты", 20, 120, 60, 5)
+    H = st.slider("Высота карты", 20, 120, 60, 5)
 
-st.sidebar.header("Карта")
-w = st.sidebar.slider("Ширина", 30, 200, 120)
-h = st.sidebar.slider("Высота", 30, 200, 120)
-seed = st.sidebar.number_input("Seed", 0, 10_000_000, 12345)
+    dist_metric = st.selectbox("Метрика расстояния", ["Euclidean", "Manhattan"], index=0)
 
-st.sidebar.header("Базы врага")
-n_enemy = st.sidebar.slider("Количество", 3, 200, 35)
-mode = st.sidebar.selectbox("Тип генерации", ["Равномерно", "Кластер", "Мульти-кластеры"])
-metric = st.sidebar.selectbox("Метрика", ["Манхэттен", "Евклид"])
+    own_players = st.slider("Активные игроки своей гильдии (N2)", 1, 200, 30, 1)
+    enemy_count = st.slider("Базы противника (N1, всего)", 1, 300, 60, 1)
 
-used_global: Set[Tuple[int, int]] = set()
-enemy_centers = None
+    enemy_layout = st.selectbox("Расстановка противника", ["Скопление", "Кластеры", "Случайно"], index=0)
 
-if mode == "Равномерно":
-    enemy_bases = gen_uniform(w, h, n_enemy, seed, used_global)
-elif mode == "Кластер":
-    spread = st.sidebar.slider("Разброс кластера", 1.0, 20.0, 6.0)
-    enemy_bases = gen_cluster(w, h, n_enemy, seed, spread, used_global)
+    # keep minimal, but need a single knob for how tight clusters are
+    cluster_spread = st.slider("Плотность (меньше = плотнее)", 1, 15, 4, 1)
+
+    k_clusters = 3
+    if enemy_layout == "Кластеры":
+        k_clusters = st.slider("Число кластеров", 2, 8, 3, 1)
+
+    wall_destroyed_pct = st.slider("Доля баз со сломанной стеной (неактивны)", 0, 90, 20, 5)
+
+    obstacles_ratio = st.slider("Препятствия (% клеток)", 0, 40, 10, 1) / 100.0
+    neutrals_count = st.slider("Нейтралы (кол-во)", 0, 200, 30, 1)
+    our_bases_count = st.slider("Свои базы (кол-во для контекста)", 0, 200, 25, 1)
+
+    tp_radius = st.slider("Радиус телепорта от точки входа", 1, 20, 5, 1)
+
+rng = rng_from_seed(int(seed))
+dist_fn = get_distance_fn(dist_metric)
+
+occupied = set()
+
+# Place obstacles first
+obstacles = place_obstacles(rng, W, H, obstacles_ratio, occupied)
+
+# Place neutrals
+neutrals = place_points_random(rng, W, H, int(neutrals_count), occupied)
+
+# Place our bases (just for visualization / occupation)
+our_bases = place_points_random(rng, W, H, int(our_bases_count), occupied)
+
+# Place enemy bases depending on scenario
+if enemy_layout == "Случайно":
+    enemy_bases = place_points_random(rng, W, H, int(enemy_count), occupied)
+elif enemy_layout == "Скопление":
+    enemy_bases = place_points_cluster(rng, W, H, int(enemy_count), occupied, spread=float(cluster_spread))
 else:
-    k = st.sidebar.slider("Количество кластеров", 2, 8, 3)
-    spread = st.sidebar.slider("Разброс кластеров", 1.0, 25.0, 6.0)
-    min_sep = st.sidebar.slider("Минимальная дистанция между центрами", 5.0, 120.0, 35.0)
-    enemy_bases, enemy_centers = gen_multi_clusters(w, h, n_enemy, seed, k, spread, min_sep, used_global)
+    enemy_bases = place_points_kclusters(rng, W, H, int(enemy_count), occupied, k=int(k_clusters), spread=float(cluster_spread))
 
-st.sidebar.header("Алгоритм точки входа")
-algo = st.sidebar.radio(
-    "Режим",
-    ["Текущий (глобальная центральность)", "Кластеры (выбрать кластер -> центр кластера)"],
-)
+# Active bases by wall status
+enemy_count_actual = len(enemy_bases)
+destroy_n = int(np.floor(enemy_count_actual * wall_destroyed_pct / 100.0))
+active_mask = np.ones(enemy_count_actual, dtype=bool)
+if destroy_n > 0:
+    idx = rng.choice(enemy_count_actual, size=destroy_n, replace=False)
+    active_mask[idx] = False
 
-cluster_link_mode = None
-cluster_pick_mode = None
-link_radius = None
+entry_base, entry_score, debug = compute_entry_base(enemy_bases, active_mask, own_players, dist_fn)
 
-if algo.startswith("Кластеры"):
-    cluster_pick_mode = st.sidebar.selectbox("Какой кластер выбирать", ["Самый большой", "Самый плотный"])
-    cluster_link_mode = st.sidebar.selectbox("Как соединять в кластеры", ["Авто", "Ручной радиус связи"])
-    if cluster_link_mode == "Авто":
-        tau = k3_median_distance(enemy_bases, metric)
-        # немного расширяем, чтобы “свои рядом” чаще попадали в один кластер
-        link_radius = st.sidebar.slider("Авто-коэф. радиуса (kNN * coef)", 1.0, 3.0, 1.6, 0.05)
-        link_radius = float(link_radius) * tau
-        st.sidebar.caption(f"Авто-оценка kNN-масштаба ≈ {tau:.2f} → link_radius ≈ {link_radius:.2f}")
-    else:
-        link_radius = st.sidebar.slider("Радиус связи (link_radius)", 1.0, 120.0, 18.0, 1.0)
+# Teleport cell: must not be on occupied. But note: entry_base itself is occupied by enemy base;
+# teleport happens near it, so keep occupied set as-is.
+tp_cell, tp_used_radius = (None, None)
+if entry_base is not None:
+    tp_cell, tp_used_radius = pick_teleport_cell(rng, entry_base, W, H, occupied, int(tp_radius))
 
-st.sidebar.header("Базы нейтралов")
-enable_neutral = st.sidebar.checkbox("Добавить нейтралов", True)
-neutral_bases: List[Base] = []
-if enable_neutral:
-    n_neutral = st.sidebar.slider("Количество нейтралов", 0, 200, 20)
-    neutral_bases = gen_uniform(w, h, n_neutral, seed + 999, used_global)
+# -----------------------------
+# Plot
+# -----------------------------
+fig = plt.figure(figsize=(10, 10))
+ax = plt.gca()
+ax.set_xlim(-0.5, W - 0.5)
+ax.set_ylim(-0.5, H - 0.5)
+ax.set_aspect("equal", adjustable="box")
+ax.set_xticks([])
+ax.set_yticks([])
+ax.set_title("Карта (цвета: враг красный, свой синий, нейтрал жёлтый, препятствие серый)")
 
-enemy_set = {(b.x, b.y) for b in enemy_bases}
-neutral_set = {(b.x, b.y) for b in neutral_bases}
-occupied = enemy_set | neutral_set
+# grid faint
+for x in range(W):
+    ax.axvline(x - 0.5, linewidth=0.2, alpha=0.15)
+for y in range(H):
+    ax.axhline(y - 0.5, linewidth=0.2, alpha=0.15)
 
-st.sidebar.header("Обстаклы")
-density = st.sidebar.slider("Плотность", 0.0, 0.4, 0.05)
-blocked: Set[Tuple[int, int]] = set()
-rng = random.Random(seed + 555)
-for _ in range(int(w * h * density)):
-    x = rng.randrange(w)
-    y = rng.randrange(h)
-    if (x, y) not in occupied:
-        blocked.add((x, y))
+if obstacles:
+    ox, oy = zip(*obstacles)
+    ax.scatter(ox, oy, s=18, marker="s", alpha=0.8)  # default color
+    # make obstacles gray explicitly
+    ax.collections[-1].set_color("gray")
 
-# ---- Pick best base according to chosen algorithm
-clusters = []
-chosen_cluster_idx = -1
+if neutrals:
+    nx, ny = zip(*neutrals)
+    ax.scatter(nx, ny, s=22, marker="o", alpha=0.9)
+    ax.collections[-1].set_color("yellow")
 
-if algo.startswith("Текущий"):
-    best_enemy, ranking = pick_best_base_global(enemy_bases, metric)
-    algo_label = "Текущий: глобальная центральность (медоид по всем)"
-else:
-    best_enemy, df_all, clusters, chosen_cluster_idx = pick_best_base_clustered(
-        enemy_bases, metric, float(link_radius), cluster_pick_mode
-    )
-    # ranking: топ по выбранному кластеру
-    ranking = df_all[df_all["В выбранном кластере"]].copy()
-    ranking = ranking.sort_values("S_in_cluster", ascending=True).reset_index(drop=True)
-    algo_label = "Новый: кластеры -> выбранный кластер -> центр (медоид внутри кластера)"
+if our_bases:
+    bx, by = zip(*our_bases)
+    ax.scatter(bx, by, s=26, marker="o", alpha=0.9)
+    ax.collections[-1].set_color("blue")
 
-st.sidebar.header("Телепорт")
-R = st.sidebar.slider("Радиус", 1, 50, 10)
-shape = st.sidebar.selectbox("Форма зоны", ["Круг", "Ромб", "Квадрат"])
-players = st.sidebar.slider("Игроков", 1, 200, 50)
+# enemies: active and inactive
+active_enemy = [p for p, a in zip(enemy_bases, active_mask) if a]
+inactive_enemy = [p for p, a in zip(enemy_bases, active_mask) if not a]
 
-tp = teleport_players(best_enemy, occupied, blocked, w, h, R, shape, players, seed + 777, True)
+if inactive_enemy:
+    ex, ey = zip(*inactive_enemy)
+    ax.scatter(ex, ey, s=26, marker="x", alpha=0.8)
+    ax.collections[-1].set_color("red")
 
-left, right = st.columns([1.4, 1])
+if active_enemy:
+    ex, ey = zip(*active_enemy)
+    ax.scatter(ex, ey, s=30, marker="o", alpha=0.95)
+    ax.collections[-1].set_color("red")
 
-with left:
-    fig, ax = plt.subplots(figsize=(7, 7))
+# entry base = red star
+if entry_base is not None:
+    ax.scatter([entry_base[0]], [entry_base[1]], s=220, marker="*", linewidths=1.5)
+    ax.collections[-1].set_color("red")
 
-    # obstacles
-    if blocked:
-        bx = [c[0] for c in blocked]
-        by = [c[1] for c in blocked]
-        ax.scatter(bx, by, s=10, color="gray", marker="s", label="Обстаклы")
+    # show teleport radius ring (approx)
+    ring = circle_points(entry_base, int(tp_radius), W, H)
+    if ring:
+        rx, ry = zip(*ring)
+        ax.scatter(rx, ry, s=6, alpha=0.08)  # subtle hint
+        ax.collections[-1].set_color("red")
 
-    # neutral
-    if neutral_bases:
-        nx = [b.x for b in neutral_bases]
-        ny = [b.y for b in neutral_bases]
-        ax.scatter(nx, ny, s=35, color="gold", label="Нейтралы")
+# teleport chosen cell (optional mark): keep minimal; mark as blue plus for clarity
+if tp_cell is not None:
+    ax.scatter([tp_cell[0]], [tp_cell[1]], s=120, marker="P", linewidths=1.0)
+    ax.collections[-1].set_color("blue")
 
-    # enemy plotting (cluster-aware)
-    ex = [b.x for b in enemy_bases]
-    ey = [b.y for b in enemy_bases]
+st.pyplot(fig, clear_figure=True)
 
-    if algo.startswith("Кластеры") and clusters:
-        # раскрасим кластеры разными цветами (простая палитра)
-        palette = ["red", "blue", "purple", "orange", "brown", "pink", "olive", "cyan"]
-        for cid, comp in enumerate(clusters):
-            cx = [enemy_bases[i].x for i in comp]
-            cy = [enemy_bases[i].y for i in comp]
-            col = palette[cid % len(palette)]
-            lbl = f"Враг (кластер {cid}, n={len(comp)})"
-            ax.scatter(cx, cy, s=35, color=col, label=lbl, alpha=0.9 if cid == chosen_cluster_idx else 0.5)
+# -----------------------------
+# Readout
+# -----------------------------
+col1, col2 = st.columns([1, 1])
 
-        # подчёркиваем выбранный кластер
-        chosen = set(clusters[chosen_cluster_idx])
-        chx = [enemy_bases[i].x for i in chosen]
-        chy = [enemy_bases[i].y for i in chosen]
-        ax.scatter(chx, chy, s=85, facecolors="none", edgecolors="black", linewidths=1.3, label="Выбранный кластер")
-
-        # если генерили мульти-кластеры — покажем центры
-        if enemy_centers:
-            ccx = [c[0] for c in enemy_centers]
-            ccy = [c[1] for c in enemy_centers]
-            ax.scatter(ccx, ccy, s=80, marker="P", color="black", label="Центры генерации")
-    else:
-        ax.scatter(ex, ey, s=35, color="red", label="Враг")
-
-    # chosen base
-    ax.scatter([best_enemy.x], [best_enemy.y], s=220, marker="*", color="black", label="Точка входа (база)")
-
-    # teleports
-    if tp["teleports"]:
-        tx = [t[0] for t in tp["teleports"]]
-        ty = [t[1] for t in tp["teleports"]]
-        ax.scatter(tx, ty, s=30, marker="x", color="green", label="Телепорт")
-
-    circ = plt.Circle((best_enemy.x, best_enemy.y), R, fill=False, linestyle="--", color="black", alpha=0.7)
-    ax.add_patch(circ)
-
-    ax.set_xlim(-1, w)
-    ax.set_ylim(-1, h)
-    ax.set_aspect("equal")
-    ax.set_title(algo_label)
-    ax.legend(loc="upper right", fontsize=8)
-    st.pyplot(fig)
-
-with right:
+with col1:
     st.subheader("Результат")
-    st.write(f"**Алгоритм:** {algo_label}")
-    if algo.startswith("Кластеры") and clusters:
-        st.write(f"**Кластеры:** {len(clusters)} | **Выбран:** {chosen_cluster_idx} (n={len(clusters[chosen_cluster_idx])})")
-        st.write(f"**link_radius:** {float(link_radius):.2f} ({'Авто' if cluster_link_mode=='Авто' else 'Ручной'})")
-
-    st.write(f"**Точка входа (база):** id={best_enemy.id} ({best_enemy.x},{best_enemy.y})")
-    st.write(f"**Успешных телепортов:** {len(tp['teleports'])}/{players}")
-    st.write(f"**Не удалось разместить:** {tp['fails']}")
-
-    st.subheader("Топ баз по ранжированию")
-    if algo.startswith("Текущий"):
-        st.dataframe(ranking.head(10), use_container_width=True)
+    if entry_base is None:
+        st.warning("Нет активных баз противника (все стены разрушены) — точка входа не выбрана.")
     else:
-        view = ranking[["id", "x", "y", "cluster", "cluster_size", "S_in_cluster", "S_global"]].copy()
-        view = view.rename(columns={
-            "S_in_cluster": "Сумма дистанций (внутри кластера)",
-            "S_global": "Сумма дистанций (глобально)",
-        })
-        st.dataframe(view.head(10), use_container_width=True)
-
-    with st.expander("Диагностика (таблица всех баз)"):
-        if algo.startswith("Текущий"):
-            st.dataframe(ranking, use_container_width=True)
+        st.write(f"**Выбранная база (точка входа):** {entry_base}")
+        st.write(f"**Score (взвешенная сумма):** {entry_score:.3f}")
+        st.write(f"**N (соседей в расчёте):** {debug['N']} (из {len(debug['active_pts'])} активных баз)")
+        if tp_cell is None:
+            st.error("Не удалось найти свободную клетку для телепорта (слишком плотная занятость/препятствия).")
         else:
-            st.dataframe(
-                df_all.sort_values(["В выбранном кластере", "S_in_cluster"], ascending=[False, True]),
-                use_container_width=True
-            )
+            if tp_used_radius == tp_radius:
+                st.write(f"**Клетка телепорта:** {tp_cell} (в радиусе {tp_radius})")
+            else:
+                st.write(f"**Клетка телепорта:** {tp_cell} (радиус расширен до {tp_used_radius})")
+
+with col2:
+    st.subheader("Быстрая проверка логики")
+    st.write("- Враги **активны**, если стена не разрушена (неактивные отмечены красным крестиком).")
+    st.write("- Точка входа — активная база с **минимальным взвешенным суммарным расстоянием** до N ближайших.")
+    st.write("- Вес: **w(d)=exp(-d/K)**, где **K=median(d1..dN)**.")
+    st.write("- Телепорт ищет **свободную** клетку в радиусе; если занято — **расширяет радиус**.")
+
+st.caption("Примечание: метку телепорта (синий 'P') можно убрать, если хочешь строго только звездочку на базе.")
