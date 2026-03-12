@@ -1,11 +1,13 @@
-from __future__ import annotations
-from dataclasses import dataclass
-from typing import List, Dict, Tuple, Optional
-import csv
+
+import streamlit as st
+import pandas as pd
+import numpy as np
 import random
 import math
-import argparse
+from dataclasses import dataclass
 from collections import deque, Counter
+from typing import List, Tuple, Optional
+import matplotlib.pyplot as plt
 
 # -----------------------------
 # Data model
@@ -16,28 +18,21 @@ class Guild:
     server_id: str
     power: float
 
-# -----------------------------
-# Your MM bucketing algorithm (as described)
-# -----------------------------
 @dataclass
 class BucketBuildStats:
     fallback_adds: int = 0
-    queue_scans: int = 0  # how many full scans we performed (per slot max 1)
+    queue_scans: int = 0
 
-def build_buckets_as_is(
-    guilds_sorted: List[Guild],
-    bucket_size: int = 16,
-) -> Tuple[List[List[Guild]], BucketBuildStats]:
-    """
-    Implements your algorithm:
-    - guilds_sorted is already sorted by power desc
-    - global FIFO waiting queue
-    - for each bucket slot:
-        - try queue with at most one full pass to find non-conflicting server
-        - if not found, try main list (current guild)
-        - fallback if both conflict
-    """
-    q = deque()  # FIFO waiting queue (Guild)
+@dataclass
+class Pair:
+    a: Guild
+    b: Guild
+
+# -----------------------------
+# Algorithm (as described by user)
+# -----------------------------
+def build_buckets_as_is(guilds_sorted: List[Guild], bucket_size: int = 16) -> Tuple[List[List[Guild]], BucketBuildStats]:
+    q = deque()
     buckets: List[List[Guild]] = []
     stats = BucketBuildStats()
 
@@ -48,21 +43,19 @@ def build_buckets_as_is(
         bucket: List[Guild] = []
         servers_in_bucket = set()
 
-        # Fill bucket slots
         while len(bucket) < bucket_size:
-            # 1) Try to fill from queue without server conflict
             picked_from_queue = False
+            scanned_queue = False
             if q:
                 # One full pass maximum per slot
                 stats.queue_scans += 1
+                scanned_queue = True
                 q_len = len(q)
                 found_idx = None
                 for _ in range(q_len):
                     g = q[0]
-                    q.rotate(-1)  # move front to back
+                    q.rotate(-1)
                     if g.server_id not in servers_in_bucket and found_idx is None:
-                        # We found a candidate; it's now at the back because of rotate,
-                        # so mark that we should take the last element.
                         found_idx = "back"
                         break
                 if found_idx == "back":
@@ -70,69 +63,35 @@ def build_buckets_as_is(
                     bucket.append(g)
                     servers_in_bucket.add(g.server_id)
                     picked_from_queue = True
-
-                # If not found, queue remains rotated; rotate back to preserve FIFO order.
-                # Important: restore original order if we didn't pick.
                 if not picked_from_queue:
                     q.rotate(q_len)
 
             if picked_from_queue:
                 continue
 
-            # 2) If still not filled, go to main list
             if i < n:
                 g = guilds_sorted[i]
                 i += 1
-
                 if g.server_id not in servers_in_bucket:
                     bucket.append(g)
                     servers_in_bucket.add(g.server_id)
                 else:
-                    # conflict: put in queue
                     q.append(g)
-
-                    # 3) Fallback condition:
-                    # - queue scan for this slot failed to find non-conflicting
-                    # - current main guild conflicts
-                    # -> add g anyway (even if server already present)
-                    #
-                    # In our flow, the queue scan "failed" means:
-                    # - we either had empty queue OR scan didn't pick
-                    # and we just encountered main list conflict.
-                    #
-                    # But your text says: fallback happens when:
-                    #   after one full pass of waiting queue no non-conflict found
-                    #   AND main list guild conflicts
-                    # So we apply fallback ONLY if q existed and scan happened and found none.
-                    #
-                    # We can track it by: if q existed and we scanned and didn't pick for this slot.
-                    # Here it's ambiguous because q could be empty. We'll interpret strictly:
-                    # fallback if q was non-empty AND we scanned it (one pass) AND didn't pick.
-                    #
-                    # We'll implement this by re-running a strict check:
-                    # if queue is non-empty AND there is no non-conflicting server in queue right now
-                    # then fallback.
-                    if q:
+                    # fallback check: if we scanned queue and no non-conflict found -> fallback
+                    if scanned_queue:
                         has_non_conflict = any(x.server_id not in servers_in_bucket for x in q)
                         if not has_non_conflict:
-                            # fallback: take current guild anyway
-                            # remove it from queue tail (it was appended just now)
-                            q.pop()
+                            q.pop()  # remove the one we just appended
                             bucket.append(g)
-                            # server already in set; keep
                             stats.fallback_adds += 1
             else:
-                # main list exhausted: must take from queue (even if conflicting) to guarantee fill
                 if q:
                     g = q.popleft()
                     bucket.append(g)
                     servers_in_bucket.add(g.server_id)
-                    # This is effectively a fallback-like behavior after main list ends,
-                    # but it's not the same as your described fallback. We won't count it.
                 else:
                     break
 
-            # If we can't fill anymore (no main list and no queue)
             if i >= n and not q and len(bucket) < bucket_size:
                 break
 
@@ -146,22 +105,10 @@ def build_buckets_as_is(
 # -----------------------------
 # Pairing inside bucket
 # -----------------------------
-@dataclass
-class Pair:
-    a: Guild
-    b: Guild
-
 def pair_bucket_min_power_gap_avoid_same_server(bucket: List[Guild]) -> List[Pair]:
-    """
-    Greedy pairing:
-    - Sort by power desc
-    - For each unpaired guild, pair with closest power unpaired guild with different server if possible,
-      else closest power regardless of server.
-    """
     remaining = bucket[:]
     remaining.sort(key=lambda g: g.power, reverse=True)
     pairs: List[Pair] = []
-
     used = [False] * len(remaining)
 
     def find_best_partner(i: int, require_diff_server: bool) -> Optional[int]:
@@ -206,44 +153,16 @@ def percentile(values: List[float], p: float) -> float:
         return values_sorted[int(k)]
     return values_sorted[f] * (c - k) + values_sorted[c] * (k - f)
 
-@dataclass
-class Report:
-    buckets_count: int
-    total_pairs: int
-    cross_server_pairs: int
-    same_server_pairs: int
-    same_server_pair_rate: float
-    bucket_unique_servers_p50: float
-    bucket_unique_servers_p10: float
-    bucket_unique_servers_p90: float
-    match_power_gap_p50: float
-    match_power_gap_p90: float
-    match_power_gap_max: float
-    bucket_power_range_p50: float
-    bucket_power_range_p90: float
-    fallback_adds: int
-    fallback_rate_per_guild: float
-    ok_by_power_gap: bool
-    ok_by_same_server_rate: bool
-
-def analyze(
-    buckets: List[List[Guild]],
-    pairing_fn,
-    power_gap_ok_p90: float,
-    same_server_rate_ok: float,
-    stats: BucketBuildStats,
-) -> Report:
-    all_pairs: List[Pair] = []
-    bucket_unique_counts: List[int] = []
-    bucket_power_ranges: List[float] = []
-
+def analyze(buckets: List[List[Guild]], pairing_fn, stats: BucketBuildStats, thresholds):
+    all_pairs = []
+    bucket_unique_counts = []
+    bucket_power_ranges = []
     for b in buckets:
         servers = {g.server_id for g in b}
         bucket_unique_counts.append(len(servers))
         pows = [g.power for g in b]
         if pows:
             bucket_power_ranges.append(max(pows) - min(pows))
-
         pairs = pairing_fn(b)
         all_pairs.extend(pairs)
 
@@ -256,159 +175,180 @@ def analyze(
     total_guilds = sum(len(b) for b in buckets) or 1
     fallback_rate = stats.fallback_adds / total_guilds
 
-    rep = Report(
-        buckets_count=len(buckets),
-        total_pairs=total_pairs,
-        cross_server_pairs=cross_server,
-        same_server_pairs=same_server,
-        same_server_pair_rate=same_rate,
-        bucket_unique_servers_p50=percentile(bucket_unique_counts, 0.50),
-        bucket_unique_servers_p10=percentile(bucket_unique_counts, 0.10),
-        bucket_unique_servers_p90=percentile(bucket_unique_counts, 0.90),
-        match_power_gap_p50=percentile(gaps, 0.50),
-        match_power_gap_p90=percentile(gaps, 0.90),
-        match_power_gap_max=max(gaps) if gaps else float("nan"),
-        bucket_power_range_p50=percentile(bucket_power_ranges, 0.50),
-        bucket_power_range_p90=percentile(bucket_power_ranges, 0.90),
-        fallback_adds=stats.fallback_adds,
-        fallback_rate_per_guild=fallback_rate,
-        ok_by_power_gap=(percentile(gaps, 0.90) <= power_gap_ok_p90) if gaps else True,
-        ok_by_same_server_rate=(same_rate <= same_server_rate_ok) if total_pairs else True,
-    )
+    rep = {
+        "buckets_count": len(buckets),
+        "total_pairs": total_pairs,
+        "cross_server_pairs": cross_server,
+        "same_server_pairs": same_server,
+        "same_server_pair_rate": same_rate,
+        "bucket_unique_servers_p50": percentile(bucket_unique_counts, 0.50),
+        "bucket_unique_servers_p10": percentile(bucket_unique_counts, 0.10),
+        "bucket_unique_servers_p90": percentile(bucket_unique_counts, 0.90),
+        "match_power_gap_p50": percentile(gaps, 0.50),
+        "match_power_gap_p90": percentile(gaps, 0.90),
+        "match_power_gap_max": max(gaps) if gaps else float("nan"),
+        "bucket_power_range_p50": percentile(bucket_power_ranges, 0.50),
+        "bucket_power_range_p90": percentile(bucket_power_ranges, 0.90),
+        "fallback_adds": stats.fallback_adds,
+        "fallback_rate_per_guild": fallback_rate,
+        "ok_by_power_gap": (percentile(gaps, 0.90) <= thresholds["power_gap_ok_p90"]) if gaps else True,
+        "ok_by_same_server_rate": (same_rate <= thresholds["same_server_rate_ok"]) if total_pairs else True,
+        "gaps": gaps,
+        "bucket_unique_counts": bucket_unique_counts,
+        "bucket_power_ranges": bucket_power_ranges,
+    }
     return rep
 
 # -----------------------------
-# IO: CSV and synthetic generator
+# Utilities: CSV read and synthetic generator
 # -----------------------------
-def read_guilds_csv(path: str) -> List[Guild]:
+def read_guilds_csv(uploaded_file) -> List[Guild]:
+    df = pd.read_csv(uploaded_file)
+    must_cols = {"guild_id", "server_id", "power"}
+    if not must_cols.issubset(set(df.columns)):
+        raise ValueError(f"CSV must contain columns: {must_cols}")
     out = []
-    with open(path, "r", newline="", encoding="utf-8") as f:
-        r = csv.DictReader(f)
-        for row in r:
-            out.append(Guild(
-                guild_id=str(row["guild_id"]),
-                server_id=str(row["server_id"]),
-                power=float(row["power"]),
-            ))
+    for _, row in df.iterrows():
+        out.append(Guild(guild_id=str(row["guild_id"]), server_id=str(row["server_id"]), power=float(row["power"])))
     return out
 
-def gen_synthetic(
-    servers: int,
-    guilds_per_server: int,
-    seed: int,
-    power_mu: float,
-    power_sigma: float,
-    server_strength_sigma: float,
-) -> List[Guild]:
+def gen_synthetic(servers: int, guilds_per_server: int, seed: int, power_mu: float, power_sigma: float, server_strength_sigma: float) -> List[Guild]:
     rnd = random.Random(seed)
-    out: List[Guild] = []
-    # server baseline offsets (to simulate "strong servers")
+    out = []
     server_offsets = [rnd.gauss(0, server_strength_sigma) for _ in range(servers)]
     for s in range(servers):
         for g in range(guilds_per_server):
             power = max(0.0, rnd.gauss(power_mu + server_offsets[s], power_sigma))
-            out.append(Guild(
-                guild_id=f"S{s}_G{g}",
-                server_id=f"S{s}",
-                power=power
-            ))
+            out.append(Guild(guild_id=f"S{s}_G{g}", server_id=f"S{s}", power=power))
     return out
 
 # -----------------------------
-# Pretty print
+# Streamlit UI
 # -----------------------------
-def print_bucket_preview(buckets: List[List[Guild]], show_buckets: int, show_rows: int):
-    show_buckets = min(show_buckets, len(buckets))
-    for bi in range(show_buckets):
-        b = buckets[bi]
-        uniq = len({g.server_id for g in b})
-        print(f"\n=== Bucket #{bi+1} (size={len(b)}, unique_servers={uniq}) ===")
-        # show top rows
-        b_sorted = sorted(b, key=lambda g: g.power, reverse=True)
-        for g in b_sorted[:show_rows]:
-            print(f"  {g.guild_id:12}  server={g.server_id:8}  power={g.power:.2f}")
-        if len(b_sorted) > show_rows:
-            print(f"  ... ({len(b_sorted)-show_rows} more)")
+st.set_page_config(page_title="MM Prototype (RU)", layout="wide")
+st.title("Прототип MM — алгоритм 'как есть' (FIFO + фолбэк)")
+st.markdown("Демонстрация твоего алгоритма, визуализация бакетов и аналитика пар матчей. Интерфейс на русском.")
 
-def print_report(rep: Report):
-    print("\n================= SUMMARY =================")
-    print(f"Buckets built: {rep.buckets_count}")
-    print(f"Total matches (pairs): {rep.total_pairs}")
-    print(f"Cross-server pairs: {rep.cross_server_pairs}")
-    print(f"Same-server pairs:  {rep.same_server_pairs}  (rate={rep.same_server_pair_rate:.4f})")
+with st.sidebar:
+    st.header("Входные данные")
+    uploaded = st.file_uploader("Загрузить CSV (columns: guild_id, server_id, power)", type=["csv"])
+    st.markdown("---")
+    st.header("Синтетика (если CSV не загружен)")
+    servers = st.number_input("Кол-во серверов", value=2000, min_value=2, step=1)
+    guilds_per_server = st.number_input("Гильдий на сервер", value=200, min_value=1, step=1)
+    seed = st.number_input("Seed", value=1, step=1)
+    power_mu = st.number_input("Power μ", value=100000.0, step=1000.0, format="%.1f")
+    power_sigma = st.number_input("Power σ", value=15000.0, step=100.0, format="%.1f")
+    server_strength_sigma = st.number_input("Server strength σ", value=8000.0, step=100.0, format="%.1f")
+    st.markdown("---")
+    st.header("Алгоритм / настройки")
+    bucket_size = st.number_input("Размер бакета", value=16, min_value=2, step=1)
+    power_gap_ok_p90 = st.number_input("Power gap OK (p90)", value=5000.0, step=100.0, format="%.1f")
+    same_server_rate_ok = st.number_input("Доп. доля same-server пар OK", value=0.02, step=0.001, format="%.3f")
+    show_buckets = st.number_input("Показать N бакетов (preview)", value=3, min_value=1, step=1)
+    show_rows = st.number_input("Строк в бакете (preview)", value=16, min_value=1, step=1)
+    run_button = st.button("Запустить прототип")
 
-    print("\n-- Bucket server diversity --")
-    print(f"Unique servers per bucket p10/p50/p90: "
-          f"{rep.bucket_unique_servers_p10:.1f} / {rep.bucket_unique_servers_p50:.1f} / {rep.bucket_unique_servers_p90:.1f}")
+st.sidebar.markdown("## Формат CSV пример")
+st.sidebar.code("guild_id,server_id,power\ng001,s01,123456\ng002,s02,122900")
 
-    print("\n-- Power tightness --")
-    print(f"Match power gap p50/p90/max: "
-          f"{rep.match_power_gap_p50:.2f} / {rep.match_power_gap_p90:.2f} / {rep.match_power_gap_max:.2f}")
-    print(f"Bucket power range p50/p90: "
-          f"{rep.bucket_power_range_p50:.2f} / {rep.bucket_power_range_p90:.2f}")
+if run_button:
+    try:
+        if uploaded is not None:
+            guilds = read_guilds_csv(uploaded)
+        else:
+            with st.spinner("Генерируем синтетические данные..."):
+                guilds = gen_synthetic(servers=int(servers), guilds_per_server=int(guilds_per_server),
+                                       seed=int(seed), power_mu=float(power_mu),
+                                       power_sigma=float(power_sigma), server_strength_sigma=float(server_strength_sigma))
 
-    print("\n-- Fallback --")
-    print(f"Fallback adds: {rep.fallback_adds}  (per-guild rate={rep.fallback_rate_per_guild:.4f})")
+        st.write(f"Всего гильдий: {len(guilds)}")
 
-    print("\n-- OK / NOT OK flags (by thresholds) --")
-    print(f"Power gap OK (p90): {rep.ok_by_power_gap}")
-    print(f"Same-server rate OK: {rep.ok_by_same_server_rate}")
-    print("==========================================\n")
+        guilds_sorted = sorted(guilds, key=lambda g: g.power, reverse=True)
+        buckets, stats = build_buckets_as_is(guilds_sorted, bucket_size=int(bucket_size))
 
-# -----------------------------
-# Main
-# -----------------------------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", type=str, default=None, help="Path to CSV with columns: guild_id,server_id,power")
-    ap.add_argument("--bucket", type=int, default=16)
-    ap.add_argument("--show_buckets", type=int, default=3)
-    ap.add_argument("--show_rows", type=int, default=16)
+        st.subheader("Preview бакетов")
+        for bi in range(min(len(buckets), int(show_buckets))):
+            b = buckets[bi]
+            uniq = len({g.server_id for g in b})
+            st.markdown(f"**Бакет #{bi+1} (size={len(b)}, unique_servers={uniq})**")
+            df = pd.DataFrame([{"guild_id": g.guild_id, "server_id": g.server_id, "power": g.power} for g in sorted(b, key=lambda x: x.power, reverse=True)])
+            st.dataframe(df.head(int(show_rows)))
 
-    # thresholds (tune to your "norm")
-    ap.add_argument("--power_gap_ok_p90", type=float, default=5000.0,
-                    help="p90 of match power gap must be <= this to be OK")
-    ap.add_argument("--same_server_rate_ok", type=float, default=0.02,
-                    help="same-server pair rate must be <= this to be OK")
+        rep = analyze(buckets=buckets, pairing_fn=pair_bucket_min_power_gap_avoid_same_server, stats=stats,
+                      thresholds={"power_gap_ok_p90": float(power_gap_ok_p90), "same_server_rate_ok": float(same_server_rate_ok)})
 
-    # synthetic params (if --csv not provided)
-    ap.add_argument("--servers", type=int, default=2000)
-    ap.add_argument("--guilds_per_server", type=int, default=200)
-    ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--power_mu", type=float, default=100000.0)
-    ap.add_argument("--power_sigma", type=float, default=15000.0)
-    ap.add_argument("--server_strength_sigma", type=float, default=8000.0)
+        st.subheader("Итоговая аналитика")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Собрано бакетов", rep["buckets_count"])
+            st.metric("Всего пар (матчей)", rep["total_pairs"])
+            st.metric("Same-server пар", f'{rep["same_server_pairs"]} ({rep["same_server_pair_rate"]:.3%})')
+            st.metric("Fallback adds (всего)", stats.fallback_adds)
+            st.metric("Fallback rate (на гильдию)", f'{rep["fallback_rate_per_guild"]:.4f}')
+        with col2:
+            st.metric("Unique servers per bucket (p50)", f'{rep["bucket_unique_servers_p50"]:.1f}')
+            st.metric("Match power gap p50", f'{rep["match_power_gap_p50"]:.2f}')
+            st.metric("Match power gap p90", f'{rep["match_power_gap_p90"]:.2f}')
+            st.metric("Bucket power range p90", f'{rep["bucket_power_range_p90"]:.2f}')
 
-    args = ap.parse_args()
+        st.markdown("**OK-флаги:**")
+        st.write(f'Power gap p90 OK: {rep["ok_by_power_gap"]} — (threshold {power_gap_ok_p90})')
+        st.write(f'Same-server rate OK: {rep["ok_by_same_server_rate"]} — (threshold {same_server_rate_ok})')
 
-    if args.csv:
-        guilds = read_guilds_csv(args.csv)
-    else:
-        guilds = gen_synthetic(
-            servers=args.servers,
-            guilds_per_server=args.guilds_per_server,
-            seed=args.seed,
-            power_mu=args.power_mu,
-            power_sigma=args.power_sigma,
-            server_strength_sigma=args.server_strength_sigma,
-        )
+        # show distribution of match gaps
+        gaps = rep["gaps"]
+        if gaps:
+            st.subheader("Гистограмма разницы power в парах")
+            fig, ax = plt.subplots(figsize=(6,3))
+            ax.hist(gaps, bins=40)
+            ax.set_xlabel("abs(power_a - power_b)")
+            ax.set_ylabel("count")
+            st.pyplot(fig)
 
-    # sort by power desc
-    guilds_sorted = sorted(guilds, key=lambda g: g.power, reverse=True)
+        # show bucket unique distribution
+        counts = rep["bucket_unique_counts"]
+        if counts:
+            st.subheader("Распределение уникальности серверов в бакетах")
+            fig2, ax2 = plt.subplots(figsize=(6,3))
+            ax2.hist(counts, bins=range(min(counts), max(counts)+2))
+            ax2.set_xlabel("Уникальных серверов в бакете")
+            ax2.set_ylabel("count")
+            st.pyplot(fig2)
 
-    buckets, build_stats = build_buckets_as_is(guilds_sorted, bucket_size=args.bucket)
+        # top servers by internal matches (diagnostic)
+        server_internal = Counter()
+        for b in buckets:
+            pairs = pair_bucket_min_power_gap_avoid_same_server(b)
+            for p in pairs:
+                if p.a.server_id == p.b.server_id:
+                    server_internal[p.a.server_id] += 1
+        if server_internal:
+            st.subheader("Топ серверов по внутр. матчам (same-server)")
+            top_df = pd.DataFrame(server_internal.most_common(20), columns=["server_id", "same_server_matches"])
+            st.dataframe(top_df)
 
-    print_bucket_preview(buckets, show_buckets=args.show_buckets, show_rows=args.show_rows)
+        # Export results: buckets & pairs as csv downloadable
+        export_buckets = []
+        for bi, b in enumerate(buckets):
+            for g in b:
+                export_buckets.append({"bucket_id": bi+1, "guild_id": g.guild_id, "server_id": g.server_id, "power": g.power})
+        df_export_buckets = pd.DataFrame(export_buckets)
 
-    rep = analyze(
-        buckets=buckets,
-        pairing_fn=pair_bucket_min_power_gap_avoid_same_server,
-        power_gap_ok_p90=args.power_gap_ok_p90,
-        same_server_rate_ok=args.same_server_rate_ok,
-        stats=build_stats,
-    )
+        export_pairs = []
+        for bi, b in enumerate(buckets):
+            pairs = pair_bucket_min_power_gap_avoid_same_server(b)
+            for p in pairs:
+                export_pairs.append({"bucket_id": bi+1,
+                                     "a_guild": p.a.guild_id, "a_server": p.a.server_id, "a_power": p.a.power,
+                                     "b_guild": p.b.guild_id, "b_server": p.b.server_id, "b_power": p.b.power})
+        df_export_pairs = pd.DataFrame(export_pairs)
 
-    print_report(rep)
+        st.download_button("Скачать buckets.csv", df_export_buckets.to_csv(index=False).encode('utf-8'), "buckets.csv", "text/csv")
+        st.download_button("Скачать pairs.csv", df_export_pairs.to_csv(index=False).encode('utf-8'), "pairs.csv", "text/csv")
 
-if __name__ == "__main__":
-    main()
+    except Exception as e:
+        st.error(f"Ошибка: {e}")
+
+else:
+    st.info("Настройте параметры в сайдбаре и нажмите 'Запустить прототип' для генерации бакетов и аналитики.")
