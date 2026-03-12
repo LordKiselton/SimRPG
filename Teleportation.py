@@ -1,3 +1,5 @@
+import textwrap, os, re, json, pathlib, datetime
+code = r'''
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
@@ -166,6 +168,110 @@ def teleport_group_sequentially(rng, anchor, W, H, occupied, group_size, start_r
         occupied.add(cell)
     return placements, used_radii
 
+def relocate_inactive_to_edge(rng, W, H, occupied, enemy_bases, active_mask):
+    """
+    Requirement: bases with destroyed wall (inactive_mask=False) must ALWAYS end up on the map edge.
+
+    We do it without changing the existing generation logic:
+    1) Free current inactive base cells from 'occupied'
+    2) Try to place them on free edge cells
+    3) If edge is too crowded, swap with ACTIVE enemy bases that are already on the edge
+       (never touching obstacles/neutrals).
+    """
+    n = len(enemy_bases)
+    if n == 0:
+        return enemy_bases
+
+    inactive_idx = [i for i, a in enumerate(active_mask) if not a]
+    if not inactive_idx:
+        return enemy_bases
+
+    def is_edge(p):
+        x, y = p
+        return x == 0 or y == 0 or x == W - 1 or y == H - 1
+
+    # Remember old inactive positions (these will become available for swaps)
+    old_inactive_positions = [enemy_bases[i] for i in inactive_idx]
+
+    # 1) Free inactive positions from occupied
+    for p in old_inactive_positions:
+        occupied.discard(p)
+
+    # 2) Free edge positions
+    edge_cells = []
+    for x in range(W):
+        edge_cells.append((x, 0))
+        edge_cells.append((x, H - 1))
+    for y in range(1, H - 1):
+        edge_cells.append((0, y))
+        edge_cells.append((W - 1, y))
+
+    free_edge = [p for p in edge_cells if p not in occupied]
+
+    # Assign as many as possible to free edge
+    need = len(inactive_idx)
+    take = min(need, len(free_edge))
+    if take > 0:
+        chosen = rng.choice(len(free_edge), size=take, replace=False)
+        for k in range(take):
+            idx_base = inactive_idx[k]
+            new_p = free_edge[int(chosen[k])]
+            enemy_bases[idx_base] = new_p
+            occupied.add(new_p)
+
+    remaining = need - take
+    if remaining <= 0:
+        return enemy_bases
+
+    # 3) Edge is crowded: swap remaining inactive bases with ACTIVE enemy bases ON THE EDGE.
+    #    We only swap with active bases to avoid moving obstacles/neutrals.
+    active_edge_indices = [i for i, a in enumerate(active_mask) if a and is_edge(enemy_bases[i])]
+    if not active_edge_indices:
+        # Edge fully blocked by obstacles/neutrals or other non-movable objects.
+        # Best effort: put remaining on edge if any free edge appeared (shouldn't), otherwise keep as-is.
+        return enemy_bases
+
+    # We also need free non-edge positions to move those swapped active bases into.
+    # We use the old inactive positions we freed. If those are insufficient, we sample other free cells.
+    swap_targets = list(old_inactive_positions)  # preferred: preserves density pattern best
+    if len(swap_targets) < remaining:
+        extra = sample_free_cells(rng, W, H, occupied, remaining - len(swap_targets))
+        swap_targets += extra
+
+    # Perform swaps for remaining inactive bases
+    for t in range(remaining):
+        idx_inactive = inactive_idx[take + t]
+        # Pick one active edge base to swap with
+        pick_k = int(rng.integers(0, len(active_edge_indices)))
+        idx_active_edge = active_edge_indices.pop(pick_k)
+
+        # Active edge position becomes inactive new edge position
+        edge_pos = enemy_bases[idx_active_edge]
+
+        # Move active base into a freed inner position (swap target)
+        target_pos = swap_targets[t]
+        # Ensure target is actually free right now (it should be, but be safe)
+        if target_pos in occupied:
+            # Find any free cell as fallback
+            fallback = sample_free_cells(rng, W, H, occupied, 1)
+            if fallback:
+                target_pos = fallback[0]
+            else:
+                # No free cells at all; keep active base in place and just stop
+                enemy_bases[idx_inactive] = edge_pos
+                occupied.add(edge_pos)
+                continue
+
+        # Update occupied: remove active edge, place active at target, place inactive at edge
+        occupied.discard(edge_pos)
+        enemy_bases[idx_active_edge] = target_pos
+        occupied.add(target_pos)
+
+        enemy_bases[idx_inactive] = edge_pos
+        occupied.add(edge_pos)
+
+    return enemy_bases
+
 # -----------------------------
 # UI
 # -----------------------------
@@ -224,6 +330,9 @@ active_mask = np.ones(enemy_count_actual, dtype=bool)
 if destroy_n > 0 and enemy_count_actual > 0:
     idx = rng.choice(enemy_count_actual, size=destroy_n, replace=False)
     active_mask[idx] = False
+
+# NEW: Force inactive (destroyed wall) bases to be on the edge
+enemy_bases = relocate_inactive_to_edge(rng, W, H, occupied, enemy_bases, active_mask)
 
 # 1) Choose enemy "entry base" (anchor)
 entry_enemy_base, entry_score, debug = compute_entry_enemy_base(enemy_bases, active_mask, own_players, dist_fn)
@@ -331,3 +440,8 @@ with col2:
     st.write("- Якорь (⭐) — только для выбора зоны; телепорт идёт в **свободные клетки вокруг**.")
 
 st.caption("Если хочешь — могу добавить режим: телепортировать не всех N2, а только пачку (например, 5/10/20) без лишних параметров.")
+'''
+path = "/mnt/data/teleport_entry_selector_simulator_edge_inactive.py"
+with open(path, "w", encoding="utf-8") as f:
+    f.write(textwrap.dedent(code).lstrip("\n"))
+path
