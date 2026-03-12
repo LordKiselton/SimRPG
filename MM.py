@@ -391,59 +391,51 @@ if run_button:
         )
 
         # -----------------------------
-        # Improved analytics (compact, readable)
+        # Improved analytics (compact, readable) — RU naming
         # -----------------------------
-        st.subheader("MM Analytics")
+        st.subheader("Аналитика MM")
 
         score, score_max, notes = mm_health_score(rep, fallback_rate_warn=0.01)
-        # 3 columns: Match balance / Cross-server / Bucket build
+
         colA, colB, colC = st.columns(3)
 
-        # A) Match balance
         with colA:
-            st.markdown("**Match balance**")
-            st.metric("Gap p50", f'{rep["match_power_gap_p50"]:.0f}')
+            st.markdown("**Качество матчей (power gap)**")
+            st.metric("Разница силы (gap) p50", f'{rep["match_power_gap_p50"]:.0f}')
             st.metric(
-                f'Gap p90 (target ≤ {rep["thresholds"]["power_gap_ok_p90"]:.0f})',
+                f'Разница силы (gap) p90 (target ≤ {rep["thresholds"]["power_gap_ok_p90"]:.0f})',
                 f'{rep["match_power_gap_p90"]:.0f}',
             )
-            st.metric("Gap max", f'{rep["match_power_gap_max"]:.0f}')
+            st.metric("Худший матч (max gap)", f'{rep["match_power_gap_max"]:.0f}')
 
-        # B) Cross-server
         with colB:
-            st.markdown("**Cross-server quality**")
+            st.markdown("**Кросс-серверность**")
             st.metric(
-                f'Same-server rate (target ≤ {rep["thresholds"]["same_server_rate_ok"]:.3f})',
+                f'Доля same-server матчей (target ≤ {rep["thresholds"]["same_server_rate_ok"]:.3f})',
                 f'{rep["same_server_pair_rate"]:.3%}',
             )
-            st.metric("Same-server matches", f'{rep["same_server_pairs"]}')
-            st.metric("Matches total", f'{rep["total_pairs"]}')
+            st.metric("Same-server матчей (шт.)", f'{rep["same_server_pairs"]}')
+            st.metric("Всего матчей (шт.)", f'{rep["total_pairs"]}')
 
-        # C) Bucket build
         with colC:
-            st.markdown("**Bucket build**")
-            st.metric("Unique servers / bucket (p50)", f'{rep["bucket_unique_servers_p50"]:.1f}')
-            st.metric("Bucket power spread (p90)", f'{rep["bucket_power_range_p90"]:.0f}')
-            st.metric("Fallback pressure", f'{rep["fallback_rate_per_guild"]:.4f}')
+            st.markdown("**Здоровье бакетов**")
+            st.metric("Уникальных серверов в бакете (p50)", f'{rep["bucket_unique_servers_p50"]:.1f}')
+            st.metric("Разброс силы внутри бакета (p90)", f'{rep["bucket_power_range_p90"]:.0f}')
+            st.metric("Fallback pressure (на гильдию)", f'{rep["fallback_rate_per_guild"]:.4f}')
 
-        # Overall verdict line (compact)
         verdict_icon = "✅" if score == score_max else ("⚠️" if score >= 2 else "❌")
-        st.markdown(f"**MM Health:** {score}/{score_max} {verdict_icon}")
+        st.markdown(f"**Итоговый статус:** {score}/{score_max} {verdict_icon}")
 
         if notes:
-            # One compact, readable line (no wall of text)
             st.caption(" • ".join(notes))
 
-        # Keep detailed stuff collapsed
-        with st.expander("Technical details"):
-            st.write(f'Power gap p90 OK: {rep["ok_by_power_gap"]} — (target {power_gap_ok_p90})')
-            st.write(f'Same-server rate OK: {rep["ok_by_same_server_rate"]} — (target {same_server_rate_ok})')
-            st.write(f"Buckets: {rep['buckets_count']}")
-            st.write(f"Fallback adds: {stats.fallback_adds}")
-
-            # optional extra percentiles if needed
-            st.write(f"Unique servers / bucket p10/p90: {rep['bucket_unique_servers_p10']:.1f} / {rep['bucket_unique_servers_p90']:.1f}")
-            st.write(f"Bucket power spread p50: {rep['bucket_power_range_p50']:.0f}")
+        with st.expander("Тех. детали"):
+            st.write(f'Power gap p90 OK: {rep["ok_by_power_gap"]} — target {rep["thresholds"]["power_gap_ok_p90"]:.0f}')
+            st.write(f'Same-server rate OK: {rep["ok_by_same_server_rate"]} — target {rep["thresholds"]["same_server_rate_ok"]:.3f}')
+            st.write(f"Бакетов собрано: {rep['buckets_count']}")
+            st.write(f"Fallback adds (всего): {stats.fallback_adds}")
+            st.write(f"Уникальных серверов в бакете p10/p90: {rep['bucket_unique_servers_p10']:.1f} / {rep['bucket_unique_servers_p90']:.1f}")
+            st.write(f"Разброс силы в бакете p50: {rep['bucket_power_range_p50']:.0f}")
 
         # -----------------------------
         # Existing charts + diagnostics (unchanged)
