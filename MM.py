@@ -226,8 +226,8 @@ def gen_synthetic(servers: int, guilds_per_server: int, seed: int, power_mu: flo
 # Streamlit UI
 # -----------------------------
 st.set_page_config(page_title="MM Prototype (RU)", layout="wide")
-st.title("Прототип MM — алгоритм 'как есть' (FIFO + фолбэк)")
-st.markdown("Демонстрация твоего алгоритма, визуализация бакетов и аналитика пар матчей. Интерфейс на русском.")
+st.title("Прототип MM")
+st.markdown("Демонстрация алгоритма, визуализация бакетов и аналитика пар матчей.")
 
 with st.sidebar:
     st.header("Входные данные")
