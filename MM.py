@@ -222,31 +222,51 @@ def gen_synthetic(servers: int, guilds_per_server: int, seed: int, power_mu: flo
     return out
 
 # -----------------------------
-# NEW: color pairs directly inside bucket preview table
+# NEW: pair-aware sorting + coloring in the SAME preview table
 # -----------------------------
-def build_pair_color_map(bucket: List[Guild], pairing_fn) -> Dict[str, str]:
+def build_pair_meta_maps(bucket: List[Guild], pairing_fn):
     """
-    Returns dict: guild_id -> "same" or "cross"
-    Both guilds in a pair get the same label.
+    Returns:
+      - key_to_pair_id: (guild_id, server_id) -> int (1..num_pairs), unpaired -> 10^9
+      - key_to_label:   (guild_id, server_id) -> "same" / "cross" / None
     """
     pairs = pairing_fn(bucket)
-    m: Dict[str, str] = {}
-    for p in pairs:
-        label = "same" if (p.a.server_id == p.b.server_id) else "cross"
-        m[p.a.guild_id] = label
-        m[p.b.guild_id] = label
-    return m
+    key_to_pair_id: Dict[tuple, int] = {}
+    key_to_label: Dict[tuple, str] = {}
 
-def style_bucket_df_by_pairs(df_bucket: pd.DataFrame, guild_id_to_label: Dict[str, str]) -> "pd.io.formats.style.Styler":
-    # Chosen to be readable on both light/dark themes (no background fill).
-    # Slightly brighter green/red for dark, still OK on light.
+    for idx, p in enumerate(pairs, start=1):
+        label = "same" if (p.a.server_id == p.b.server_id) else "cross"
+        ka = (p.a.guild_id, p.a.server_id)
+        kb = (p.b.guild_id, p.b.server_id)
+        key_to_pair_id[ka] = idx
+        key_to_pair_id[kb] = idx
+        key_to_label[ka] = label
+        key_to_label[kb] = label
+
+    # Guilds that didn't get paired (если bucket нечетный или pairing прервался)
+    UNPAIRED = 10**9
+    for g in bucket:
+        k = (g.guild_id, g.server_id)
+        if k not in key_to_pair_id:
+            key_to_pair_id[k] = UNPAIRED
+
+    return key_to_pair_id, key_to_label
+
+def sort_bucket_df_by_pairs_then_power(df_bucket: pd.DataFrame, key_to_pair_id: Dict[tuple, int]) -> pd.DataFrame:
+    df = df_bucket.copy()
+    df["_pair_id"] = df.apply(lambda r: key_to_pair_id.get((str(r["guild_id"]), str(r["server_id"])), 10**9), axis=1)
+    # sort: pair_id asc, power desc
+    df = df.sort_values(by=["_pair_id", "power"], ascending=[True, False], kind="mergesort").drop(columns=["_pair_id"])
+    return df
+
+def style_bucket_df_by_pairs(df_bucket: pd.DataFrame, key_to_label: Dict[tuple, str]) -> "pd.io.formats.style.Styler":
     GREEN = "#2ECC71"  # cross-server
     RED = "#FF5C5C"    # same-server
-    NEUTRAL = ""       # default
+    NEUTRAL = ""
 
     def row_style(row):
-        gid = str(row.get("guild_id", ""))
-        label = guild_id_to_label.get(gid)
+        k = (str(row.get("guild_id", "")), str(row.get("server_id", "")))
+        label = key_to_label.get(k)
         if label == "cross":
             return [f"color: {GREEN}; font-weight: 600"] * len(row)
         if label == "same":
@@ -293,9 +313,14 @@ if run_button:
             guilds = read_guilds_csv(uploaded)
         else:
             with st.spinner("Генерируем синтетические данные..."):
-                guilds = gen_synthetic(servers=int(servers), guilds_per_server=int(guilds_per_server),
-                                       seed=int(seed), power_mu=float(power_mu),
-                                       power_sigma=float(power_sigma), server_strength_sigma=float(server_strength_sigma))
+                guilds = gen_synthetic(
+                    servers=int(servers),
+                    guilds_per_server=int(guilds_per_server),
+                    seed=int(seed),
+                    power_mu=float(power_mu),
+                    power_sigma=float(power_sigma),
+                    server_strength_sigma=float(server_strength_sigma),
+                )
 
         st.write(f"Всего гильдий: {len(guilds)}")
 
@@ -303,25 +328,33 @@ if run_button:
         buckets, stats = build_buckets_as_is(guilds_sorted, bucket_size=int(bucket_size))
 
         st.subheader("Preview бакетов")
-        st.caption("Подсветка: зелёным — пара cross-server, красным — пара same-server (обе гильдии пары одинаково).")
+        st.caption("Сортировка: сначала по парам (pair_id), затем по power. Подсветка: зелёный=cross-server, красный=same-server (обе гильдии пары).")
         for bi in range(min(len(buckets), int(show_buckets))):
             b = buckets[bi]
             uniq = len({g.server_id for g in b})
             st.markdown(f"**Бакет #{bi+1} (size={len(b)}, unique_servers={uniq})**")
 
-            # Same preview entity: single table, just styled by pairing result
-            df = pd.DataFrame([{"guild_id": g.guild_id, "server_id": g.server_id, "power": g.power}
-                               for g in sorted(b, key=lambda x: x.power, reverse=True)])
-            df_preview = df.head(int(show_rows)).copy()
+            # Build base df for bucket
+            df = pd.DataFrame([{"guild_id": g.guild_id, "server_id": g.server_id, "power": g.power} for g in b])
 
-            # Build color map on FULL bucket (not only head), then apply to preview
-            gid_to_label = build_pair_color_map(b, pairing_fn=pair_bucket_min_power_gap_avoid_same_server)
-            styled = style_bucket_df_by_pairs(df_preview, gid_to_label)
+            # Pair-aware meta
+            key_to_pair_id, key_to_label = build_pair_meta_maps(b, pairing_fn=pair_bucket_min_power_gap_avoid_same_server)
 
+            # Sort by pair then power
+            df_sorted = sort_bucket_df_by_pairs_then_power(df, key_to_pair_id)
+
+            # Apply show_rows AFTER sorting to keep pairs grouped in preview
+            df_preview = df_sorted.head(int(show_rows)).copy()
+
+            styled = style_bucket_df_by_pairs(df_preview, key_to_label)
             st.dataframe(styled, use_container_width=True)
 
-        rep = analyze(buckets=buckets, pairing_fn=pair_bucket_min_power_gap_avoid_same_server, stats=stats,
-                      thresholds={"power_gap_ok_p90": float(power_gap_ok_p90), "same_server_rate_ok": float(same_server_rate_ok)})
+        rep = analyze(
+            buckets=buckets,
+            pairing_fn=pair_bucket_min_power_gap_avoid_same_server,
+            stats=stats,
+            thresholds={"power_gap_ok_p90": float(power_gap_ok_p90), "same_server_rate_ok": float(same_server_rate_ok)},
+        )
 
         st.subheader("Итоговая аналитика")
         col1, col2 = st.columns(2)
@@ -345,7 +378,7 @@ if run_button:
         gaps = rep["gaps"]
         if gaps:
             st.subheader("Гистограмма разницы power в парах")
-            fig, ax = plt.subplots(figsize=(6,3))
+            fig, ax = plt.subplots(figsize=(6, 3))
             ax.hist(gaps, bins=40)
             ax.set_xlabel("abs(power_a - power_b)")
             ax.set_ylabel("count")
@@ -355,8 +388,8 @@ if run_button:
         counts = rep["bucket_unique_counts"]
         if counts:
             st.subheader("Распределение уникальности серверов в бакетах")
-            fig2, ax2 = plt.subplots(figsize=(6,3))
-            ax2.hist(counts, bins=range(min(counts), max(counts)+2))
+            fig2, ax2 = plt.subplots(figsize=(6, 3))
+            ax2.hist(counts, bins=range(min(counts), max(counts) + 2))
             ax2.set_xlabel("Уникальных серверов в бакете")
             ax2.set_ylabel("count")
             st.pyplot(fig2)
@@ -377,20 +410,38 @@ if run_button:
         export_buckets = []
         for bi, b in enumerate(buckets):
             for g in b:
-                export_buckets.append({"bucket_id": bi+1, "guild_id": g.guild_id, "server_id": g.server_id, "power": g.power})
+                export_buckets.append({"bucket_id": bi + 1, "guild_id": g.guild_id, "server_id": g.server_id, "power": g.power})
         df_export_buckets = pd.DataFrame(export_buckets)
 
         export_pairs = []
         for bi, b in enumerate(buckets):
             pairs = pair_bucket_min_power_gap_avoid_same_server(b)
             for p in pairs:
-                export_pairs.append({"bucket_id": bi+1,
-                                     "a_guild": p.a.guild_id, "a_server": p.a.server_id, "a_power": p.a.power,
-                                     "b_guild": p.b.guild_id, "b_server": p.b.server_id, "b_power": p.b.power})
+                export_pairs.append(
+                    {
+                        "bucket_id": bi + 1,
+                        "a_guild": p.a.guild_id,
+                        "a_server": p.a.server_id,
+                        "a_power": p.a.power,
+                        "b_guild": p.b.guild_id,
+                        "b_server": p.b.server_id,
+                        "b_power": p.b.power,
+                    }
+                )
         df_export_pairs = pd.DataFrame(export_pairs)
 
-        st.download_button("Скачать buckets.csv", df_export_buckets.to_csv(index=False).encode('utf-8'), "buckets.csv", "text/csv")
-        st.download_button("Скачать pairs.csv", df_export_pairs.to_csv(index=False).encode('utf-8'), "pairs.csv", "text/csv")
+        st.download_button(
+            "Скачать buckets.csv",
+            df_export_buckets.to_csv(index=False).encode("utf-8"),
+            "buckets.csv",
+            "text/csv",
+        )
+        st.download_button(
+            "Скачать pairs.csv",
+            df_export_pairs.to_csv(index=False).encode("utf-8"),
+            "pairs.csv",
+            "text/csv",
+        )
 
     except Exception as e:
         st.error(f"Ошибка: {e}")
