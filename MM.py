@@ -195,8 +195,37 @@ def analyze(buckets: List[List[Guild]], pairing_fn, stats: BucketBuildStats, thr
         "gaps": gaps,
         "bucket_unique_counts": bucket_unique_counts,
         "bucket_power_ranges": bucket_power_ranges,
+        "thresholds": thresholds,
     }
     return rep
+
+def mm_health_score(rep: dict, fallback_rate_warn: float = 0.01) -> Tuple[int, int, List[str]]:
+    """
+    Lightweight overall health:
+      +1 power balance ok (p90 gap <= threshold)
+      +1 cross-server ok (same-server rate <= threshold)
+      +1 algorithm pressure ok (fallback_rate_per_guild <= warn)
+    """
+    score = 0
+    max_score = 3
+    notes = []
+
+    if rep.get("ok_by_power_gap", True):
+        score += 1
+    else:
+        notes.append("Power balance: p90 gap above target")
+
+    if rep.get("ok_by_same_server_rate", True):
+        score += 1
+    else:
+        notes.append("Cross-server: same-server rate above target")
+
+    if rep.get("fallback_rate_per_guild", 0.0) <= fallback_rate_warn:
+        score += 1
+    else:
+        notes.append("Bucket build: elevated fallback pressure")
+
+    return score, max_score, notes
 
 # -----------------------------
 # Utilities: CSV read and synthetic generator
@@ -222,7 +251,7 @@ def gen_synthetic(servers: int, guilds_per_server: int, seed: int, power_mu: flo
     return out
 
 # -----------------------------
-# NEW: pair-aware sorting + coloring in the SAME preview table
+# Pair-aware sorting + coloring in the SAME preview table
 # -----------------------------
 def build_pair_meta_maps(bucket: List[Guild], pairing_fn):
     """
@@ -243,7 +272,7 @@ def build_pair_meta_maps(bucket: List[Guild], pairing_fn):
         key_to_label[ka] = label
         key_to_label[kb] = label
 
-    # Guilds that didn't get paired (если bucket нечетный или pairing прервался)
+    # Guilds that didn't get paired (odd bucket or pairing break)
     UNPAIRED = 10**9
     for g in bucket:
         k = (g.guild_id, g.server_id)
@@ -255,11 +284,11 @@ def build_pair_meta_maps(bucket: List[Guild], pairing_fn):
 def sort_bucket_df_by_pairs_then_power(df_bucket: pd.DataFrame, key_to_pair_id: Dict[tuple, int]) -> pd.DataFrame:
     df = df_bucket.copy()
     df["_pair_id"] = df.apply(lambda r: key_to_pair_id.get((str(r["guild_id"]), str(r["server_id"])), 10**9), axis=1)
-    # sort: pair_id asc, power desc
     df = df.sort_values(by=["_pair_id", "power"], ascending=[True, False], kind="mergesort").drop(columns=["_pair_id"])
     return df
 
 def style_bucket_df_by_pairs(df_bucket: pd.DataFrame, key_to_label: Dict[tuple, str]) -> "pd.io.formats.style.Styler":
+    # Font-only coloring for theme-agnostic readability
     GREEN = "#2ECC71"  # cross-server
     RED = "#FF5C5C"    # same-server
     NEUTRAL = ""
@@ -276,6 +305,11 @@ def style_bucket_df_by_pairs(df_bucket: pd.DataFrame, key_to_label: Dict[tuple, 
     if df_bucket.empty:
         return df_bucket.style
     return df_bucket.style.apply(row_style, axis=1)
+
+def dataframe_height_for_rows(n_rows: int, row_px: int = 35, header_px: int = 38, padding_px: int = 6) -> int:
+    # Streamlit dataframe row height is ~35px (varies slightly), this avoids inner scroll for small tables.
+    n = max(1, int(n_rows))
+    return header_px + n * row_px + padding_px
 
 # -----------------------------
 # Streamlit UI
@@ -298,10 +332,12 @@ with st.sidebar:
     st.markdown("---")
     st.header("Алгоритм / настройки")
     bucket_size = st.number_input("Размер бакета", value=16, min_value=2, step=1)
-    power_gap_ok_p90 = st.number_input("Power gap OK (p90)", value=5000.0, step=100.0, format="%.1f")
-    same_server_rate_ok = st.number_input("Доп. доля same-server пар OK", value=0.02, step=0.001, format="%.3f")
+    power_gap_ok_p90 = st.number_input("Target: power gap p90", value=5000.0, step=100.0, format="%.1f")
+    same_server_rate_ok = st.number_input("Target: same-server rate", value=0.02, step=0.001, format="%.3f")
     show_buckets = st.number_input("Показать N бакетов (preview)", value=3, min_value=1, step=1)
-    show_rows = st.number_input("Строк в бакете (preview)", value=16, min_value=1, step=1)
+
+    # Instead of partial bucket, default to full bucket view (no inner scroll)
+    show_rows = st.number_input("Строк в бакете (preview)", value=int(bucket_size), min_value=1, step=1)
     run_button = st.button("Запустить прототип")
 
 st.sidebar.markdown("## Формат CSV пример")
@@ -328,26 +364,24 @@ if run_button:
         buckets, stats = build_buckets_as_is(guilds_sorted, bucket_size=int(bucket_size))
 
         st.subheader("Preview бакетов")
-        st.caption("Сортировка: сначала по парам (pair_id), затем по power. Подсветка: зелёный=cross-server, красный=same-server (обе гильдии пары).")
+        st.caption("Сортировка: сначала по парам, затем по power. Подсветка: зелёный=cross-server, красный=same-server (обе гильдии пары).")
+
         for bi in range(min(len(buckets), int(show_buckets))):
             b = buckets[bi]
             uniq = len({g.server_id for g in b})
             st.markdown(f"**Бакет #{bi+1} (size={len(b)}, unique_servers={uniq})**")
 
-            # Build base df for bucket
             df = pd.DataFrame([{"guild_id": g.guild_id, "server_id": g.server_id, "power": g.power} for g in b])
 
-            # Pair-aware meta
             key_to_pair_id, key_to_label = build_pair_meta_maps(b, pairing_fn=pair_bucket_min_power_gap_avoid_same_server)
-
-            # Sort by pair then power
             df_sorted = sort_bucket_df_by_pairs_then_power(df, key_to_pair_id)
 
-            # Apply show_rows AFTER sorting to keep pairs grouped in preview
+            # show full (or user-limited) bucket list, but without inner scroll
             df_preview = df_sorted.head(int(show_rows)).copy()
-
             styled = style_bucket_df_by_pairs(df_preview, key_to_label)
-            st.dataframe(styled, use_container_width=True)
+            h = dataframe_height_for_rows(len(df_preview))
+
+            st.dataframe(styled, use_container_width=True, height=h)
 
         rep = analyze(
             buckets=buckets,
@@ -356,25 +390,64 @@ if run_button:
             thresholds={"power_gap_ok_p90": float(power_gap_ok_p90), "same_server_rate_ok": float(same_server_rate_ok)},
         )
 
-        st.subheader("Итоговая аналитика")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Собрано бакетов", rep["buckets_count"])
-            st.metric("Всего пар (матчей)", rep["total_pairs"])
-            st.metric("Same-server пар", f'{rep["same_server_pairs"]} ({rep["same_server_pair_rate"]:.3%})')
-            st.metric("Fallback adds (всего)", stats.fallback_adds)
-            st.metric("Fallback rate (на гильдию)", f'{rep["fallback_rate_per_guild"]:.4f}')
-        with col2:
-            st.metric("Unique servers per bucket (p50)", f'{rep["bucket_unique_servers_p50"]:.1f}')
-            st.metric("Match power gap p50", f'{rep["match_power_gap_p50"]:.2f}')
-            st.metric("Match power gap p90", f'{rep["match_power_gap_p90"]:.2f}')
-            st.metric("Bucket power range p90", f'{rep["bucket_power_range_p90"]:.2f}')
+        # -----------------------------
+        # Improved analytics (compact, readable)
+        # -----------------------------
+        st.subheader("MM Analytics")
 
-        st.markdown("**OK-флаги:**")
-        st.write(f'Power gap p90 OK: {rep["ok_by_power_gap"]} — (threshold {power_gap_ok_p90})')
-        st.write(f'Same-server rate OK: {rep["ok_by_same_server_rate"]} — (threshold {same_server_rate_ok})')
+        score, score_max, notes = mm_health_score(rep, fallback_rate_warn=0.01)
+        # 3 columns: Match balance / Cross-server / Bucket build
+        colA, colB, colC = st.columns(3)
 
-        # show distribution of match gaps
+        # A) Match balance
+        with colA:
+            st.markdown("**Match balance**")
+            st.metric("Gap p50", f'{rep["match_power_gap_p50"]:.0f}')
+            st.metric(
+                f'Gap p90 (target ≤ {rep["thresholds"]["power_gap_ok_p90"]:.0f})',
+                f'{rep["match_power_gap_p90"]:.0f}',
+            )
+            st.metric("Gap max", f'{rep["match_power_gap_max"]:.0f}')
+
+        # B) Cross-server
+        with colB:
+            st.markdown("**Cross-server quality**")
+            st.metric(
+                f'Same-server rate (target ≤ {rep["thresholds"]["same_server_rate_ok"]:.3f})',
+                f'{rep["same_server_pair_rate"]:.3%}',
+            )
+            st.metric("Same-server matches", f'{rep["same_server_pairs"]}')
+            st.metric("Matches total", f'{rep["total_pairs"]}')
+
+        # C) Bucket build
+        with colC:
+            st.markdown("**Bucket build**")
+            st.metric("Unique servers / bucket (p50)", f'{rep["bucket_unique_servers_p50"]:.1f}')
+            st.metric("Bucket power spread (p90)", f'{rep["bucket_power_range_p90"]:.0f}')
+            st.metric("Fallback pressure", f'{rep["fallback_rate_per_guild"]:.4f}')
+
+        # Overall verdict line (compact)
+        verdict_icon = "✅" if score == score_max else ("⚠️" if score >= 2 else "❌")
+        st.markdown(f"**MM Health:** {score}/{score_max} {verdict_icon}")
+
+        if notes:
+            # One compact, readable line (no wall of text)
+            st.caption(" • ".join(notes))
+
+        # Keep detailed stuff collapsed
+        with st.expander("Technical details"):
+            st.write(f'Power gap p90 OK: {rep["ok_by_power_gap"]} — (target {power_gap_ok_p90})')
+            st.write(f'Same-server rate OK: {rep["ok_by_same_server_rate"]} — (target {same_server_rate_ok})')
+            st.write(f"Buckets: {rep['buckets_count']}")
+            st.write(f"Fallback adds: {stats.fallback_adds}")
+
+            # optional extra percentiles if needed
+            st.write(f"Unique servers / bucket p10/p90: {rep['bucket_unique_servers_p10']:.1f} / {rep['bucket_unique_servers_p90']:.1f}")
+            st.write(f"Bucket power spread p50: {rep['bucket_power_range_p50']:.0f}")
+
+        # -----------------------------
+        # Existing charts + diagnostics (unchanged)
+        # -----------------------------
         gaps = rep["gaps"]
         if gaps:
             st.subheader("Гистограмма разницы power в парах")
@@ -384,7 +457,6 @@ if run_button:
             ax.set_ylabel("count")
             st.pyplot(fig)
 
-        # show bucket unique distribution
         counts = rep["bucket_unique_counts"]
         if counts:
             st.subheader("Распределение уникальности серверов в бакетах")
@@ -394,7 +466,6 @@ if run_button:
             ax2.set_ylabel("count")
             st.pyplot(fig2)
 
-        # top servers by internal matches (diagnostic)
         server_internal = Counter()
         for b in buckets:
             pairs = pair_bucket_min_power_gap_avoid_same_server(b)
