@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -223,6 +222,37 @@ def gen_synthetic(servers: int, guilds_per_server: int, seed: int, power_mu: flo
     return out
 
 # -----------------------------
+# NEW: helpers for colored pairs preview
+# -----------------------------
+def build_pairs_preview_df(bucket: List[Guild], pairing_fn) -> pd.DataFrame:
+    pairs = pairing_fn(bucket)
+    rows = []
+    for pi, p in enumerate(pairs, start=1):
+        same = (p.a.server_id == p.b.server_id)
+        rows.append({
+            "pair_id": pi,
+            "a_guild": p.a.guild_id,
+            "a_server": p.a.server_id,
+            "a_power": p.a.power,
+            "b_guild": p.b.guild_id,
+            "b_server": p.b.server_id,
+            "b_power": p.b.power,
+            "same_server": same,
+        })
+    return pd.DataFrame(rows)
+
+def style_pairs_df(df_pairs: pd.DataFrame) -> "pd.io.formats.style.Styler":
+    def row_style(row):
+        # green if different servers, red if same server
+        color = "#d4edda" if not bool(row.get("same_server", False)) else "#f8d7da"
+        return [f"background-color: {color}"] * len(row)
+
+    if df_pairs.empty:
+        return df_pairs.style
+    # apply to whole row; keep 'same_server' visible (можно скрыть при желании)
+    return df_pairs.style.apply(row_style, axis=1)
+
+# -----------------------------
 # Streamlit UI
 # -----------------------------
 st.set_page_config(page_title="MM Prototype (RU)", layout="wide")
@@ -272,11 +302,26 @@ if run_button:
             b = buckets[bi]
             uniq = len({g.server_id for g in b})
             st.markdown(f"**Бакет #{bi+1} (size={len(b)}, unique_servers={uniq})**")
-            df = pd.DataFrame([{"guild_id": g.guild_id, "server_id": g.server_id, "power": g.power} for g in sorted(b, key=lambda x: x.power, reverse=True)])
+
+            # Existing guilds table (unchanged)
+            df = pd.DataFrame([{"guild_id": g.guild_id, "server_id": g.server_id, "power": g.power}
+                               for g in sorted(b, key=lambda x: x.power, reverse=True)])
             st.dataframe(df.head(int(show_rows)))
 
-        rep = analyze(buckets=buckets, pairing_fn=pair_bucket_min_power_gap_avoid_same_server, stats=stats,
-                      thresholds={"power_gap_ok_p90": float(power_gap_ok_p90), "same_server_rate_ok": float(same_server_rate_ok)})
+            # NEW: pairs preview with coloring
+            st.markdown("**Пары внутри бакета (зелёный = cross-server, красный = same-server):**")
+            df_pairs_preview = build_pairs_preview_df(b, pairing_fn=pair_bucket_min_power_gap_avoid_same_server)
+
+            # keep it compact; usually bucket_size=16 => pairs=8
+            styled = style_pairs_df(df_pairs_preview)
+            st.dataframe(styled, use_container_width=True)
+
+        rep = analyze(
+            buckets=buckets,
+            pairing_fn=pair_bucket_min_power_gap_avoid_same_server,
+            stats=stats,
+            thresholds={"power_gap_ok_p90": float(power_gap_ok_p90), "same_server_rate_ok": float(same_server_rate_ok)}
+        )
 
         st.subheader("Итоговая аналитика")
         col1, col2 = st.columns(2)
@@ -300,7 +345,7 @@ if run_button:
         gaps = rep["gaps"]
         if gaps:
             st.subheader("Гистограмма разницы power в парах")
-            fig, ax = plt.subplots(figsize=(6,3))
+            fig, ax = plt.subplots(figsize=(6, 3))
             ax.hist(gaps, bins=40)
             ax.set_xlabel("abs(power_a - power_b)")
             ax.set_ylabel("count")
@@ -310,8 +355,8 @@ if run_button:
         counts = rep["bucket_unique_counts"]
         if counts:
             st.subheader("Распределение уникальности серверов в бакетах")
-            fig2, ax2 = plt.subplots(figsize=(6,3))
-            ax2.hist(counts, bins=range(min(counts), max(counts)+2))
+            fig2, ax2 = plt.subplots(figsize=(6, 3))
+            ax2.hist(counts, bins=range(min(counts), max(counts) + 2))
             ax2.set_xlabel("Уникальных серверов в бакете")
             ax2.set_ylabel("count")
             st.pyplot(fig2)
@@ -332,16 +377,18 @@ if run_button:
         export_buckets = []
         for bi, b in enumerate(buckets):
             for g in b:
-                export_buckets.append({"bucket_id": bi+1, "guild_id": g.guild_id, "server_id": g.server_id, "power": g.power})
+                export_buckets.append({"bucket_id": bi + 1, "guild_id": g.guild_id, "server_id": g.server_id, "power": g.power})
         df_export_buckets = pd.DataFrame(export_buckets)
 
         export_pairs = []
         for bi, b in enumerate(buckets):
             pairs = pair_bucket_min_power_gap_avoid_same_server(b)
             for p in pairs:
-                export_pairs.append({"bucket_id": bi+1,
-                                     "a_guild": p.a.guild_id, "a_server": p.a.server_id, "a_power": p.a.power,
-                                     "b_guild": p.b.guild_id, "b_server": p.b.server_id, "b_power": p.b.power})
+                export_pairs.append({
+                    "bucket_id": bi + 1,
+                    "a_guild": p.a.guild_id, "a_server": p.a.server_id, "a_power": p.a.power,
+                    "b_guild": p.b.guild_id, "b_server": p.b.server_id, "b_power": p.b.power
+                })
         df_export_pairs = pd.DataFrame(export_pairs)
 
         st.download_button("Скачать buckets.csv", df_export_buckets.to_csv(index=False).encode('utf-8'), "buckets.csv", "text/csv")
