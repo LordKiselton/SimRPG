@@ -231,25 +231,100 @@ def mm_health_score(rep: dict, fallback_rate_warn: float = 0.01) -> Tuple[int, i
 # Utilities: CSV read and synthetic generator
 # -----------------------------
 def read_guilds_csv(uploaded_file) -> List[Guild]:
-    df = pd.read_csv(uploaded_file)
+    import os
+
+    def normalize_colname(c: str) -> str:
+        return str(c).strip()
+
+    def parse_power(v) -> float:
+        if pd.isna(v):
+            raise ValueError("power is empty")
+
+        # already numeric
+        if isinstance(v, (int, float, np.integer, np.floating)):
+            return float(v)
+
+        s = str(v).strip()
+
+        if s == "":
+            raise ValueError("power is empty string")
+
+        # remove spaces / non-breaking spaces
+        s = s.replace("\u00A0", "").replace(" ", "")
+
+        # Handle common numeric formats:
+        # 803,40 -> 803.40
+        # 1 234,56 -> 1234.56
+        # 1,234.56 -> 1234.56
+        # 1234.56 -> 1234.56
+        if "," in s and "." in s:
+            # assume comma is thousands separator if dot is last decimal separator
+            if s.rfind(".") > s.rfind(","):
+                s = s.replace(",", "")
+            else:
+                s = s.replace(".", "").replace(",", ".")
+        elif "," in s:
+            s = s.replace(",", ".")
+
+        return float(s)
+
+    # read file by extension
+    filename = getattr(uploaded_file, "name", "").lower()
+    if filename.endswith(".xlsx") or filename.endswith(".xls"):
+        df = pd.read_excel(uploaded_file)
+    else:
+        # safer csv parsing for different separators/encodings
+        try:
+            df = pd.read_csv(uploaded_file)
+        except Exception:
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, sep=";")
+
+    df.columns = [normalize_colname(c) for c in df.columns]
+
+    # accepted aliases
+    colmap = {}
+    aliases = {
+        "guild_id": ["guild_id", "clan_id", "clanId", "id"],
+        "server_id": ["server_id", "serverId", "server", "server_id_str"],
+        "power": ["power", "season_start_power", "guild_power"],
+    }
+
+    for target, variants in aliases.items():
+        for v in variants:
+            if v in df.columns:
+                colmap[target] = v
+                break
+
     must_cols = {"guild_id", "server_id", "power"}
-    if not must_cols.issubset(set(df.columns)):
-        raise ValueError(f"CSV must contain columns: {must_cols}")
-    out = []
-    for _, row in df.iterrows():
-        out.append(Guild(guild_id=str(row["guild_id"]), server_id=str(row["server_id"]), power=float(row["power"])))
-    return out
+    if set(colmap.keys()) != must_cols:
+        raise ValueError(
+            "Файл должен содержать колонки guild_id/server_id/power "
+            "или их алиасы: clan_id, serverId, season_start_power"
+        )
 
-def gen_synthetic(servers: int, guilds_per_server: int, seed: int, power_mu: float, power_sigma: float, server_strength_sigma: float) -> List[Guild]:
-    rnd = random.Random(seed)
-    out = []
-    server_offsets = [rnd.gauss(0, server_strength_sigma) for _ in range(servers)]
-    for s in range(servers):
-        for g in range(guilds_per_server):
-            power = max(0.0, rnd.gauss(power_mu + server_offsets[s], power_sigma))
-            out.append(Guild(guild_id=f"S{s}_G{g}", server_id=f"S{s}", power=power))
-    return out
+    work = df[[colmap["guild_id"], colmap["server_id"], colmap["power"]]].copy()
+    work.columns = ["guild_id", "server_id", "power"]
 
+    # drop empty ids / servers
+    work["guild_id"] = work["guild_id"].astype(str).str.strip()
+    work["server_id"] = work["server_id"].astype(str).str.strip()
+    work = work[(work["guild_id"] != "") & (work["server_id"] != "")]
+
+    # robust power parsing
+    work["power"] = work["power"].apply(parse_power)
+
+    out = []
+    for _, row in work.iterrows():
+        out.append(
+            Guild(
+                guild_id=str(row["guild_id"]),
+                server_id=str(row["server_id"]),
+                power=float(row["power"]),
+            )
+        )
+    return out
+    
 # -----------------------------
 # Pair-aware sorting + coloring in the SAME preview table
 # -----------------------------
