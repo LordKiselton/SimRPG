@@ -1,7 +1,8 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, replace
 from typing import Dict, Tuple
 
+import pandas as pd
 import streamlit as st
 
 
@@ -24,34 +25,12 @@ def normalize_100(value: float) -> float:
     return clamp(value / 100.0, 0.0, 1.0)
 
 
-def metric_badge(actual: float, target: float, tolerance: float, fmt: str = "{:.2f}") -> str:
-    gap = actual - target
-    if abs(gap) <= tolerance:
-        color = "#15803d"
-        label = "OK"
-    elif abs(gap) <= tolerance * 2:
-        color = "#b45309"
-        label = "Close"
-    else:
-        color = "#b91c1c"
-        label = "Off"
-    return (
-        f"<div style='padding:10px;border-radius:12px;border:1px solid #e5e7eb;'>"
-        f"<div style='font-size:12px;color:#6b7280;'>Status</div>"
-        f"<div style='font-size:18px;font-weight:700;color:{color};'>{label}</div>"
-        f"<div style='font-size:13px;'>Actual: <b>{fmt.format(actual)}</b></div>"
-        f"<div style='font-size:13px;'>Target: <b>{fmt.format(target)}</b></div>"
-        f"<div style='font-size:13px;'>Gap: <b>{fmt.format(gap)}</b></div>"
-        f"</div>"
-    )
-
-
 def range_hint(value: float, good: Tuple[float, float], caution: Tuple[float, float]) -> Tuple[str, str]:
     if good[0] <= value <= good[1]:
-        return "✅ В рабочем диапазоне", "#15803d"
+        return "OK: в рабочем диапазоне", "#15803d"
     if caution[0] <= value <= caution[1]:
-        return "⚠️ Погранично", "#b45309"
-    return "❌ Рискованно / вероятен перекос", "#b91c1c"
+        return "Погранично", "#b45309"
+    return "Рискованно / вероятен перекос", "#b91c1c"
 
 
 @dataclass
@@ -85,7 +64,7 @@ TERM_HELP: Dict[str, str] = {
     "Directness": "Насколько вертикально играет команда. Чем выше значение, тем чаще выбираются более прямые решения вперёд.",
     "Width": "Ширина игры. Влияет на использование флангов и растяжение обороны.",
     "Pressing": "Интенсивность коллективного давления на соперника.",
-    "Defensive Line": "Высота линии обороны. Чем выше, тем проще душить соперника, но больше риск за спину.",
+    "Defensive Line": "Высота линии обороны. Чем выше, тем проще душить соперника, но больше риск за спина.",
     "Support Runs": "Насколько активно партнёры открываются и поддерживают игрока с мячом.",
     "Shot Bias": "Системная склонность ИИ выбирать удар чаще относительно других действий.",
     "Dribble Bias": "Системная склонность ИИ чаще идти в обыгрыш.",
@@ -128,7 +107,7 @@ CAUTION_RANGES = {
 }
 
 
-def default_roles() -> Dict[str, RoleProfile]:
+def base_roles() -> Dict[str, RoleProfile]:
     return {
         "ST": RoleProfile(84, 66, 64, 72, 80, 61, 35, 78, 73, 71, 86),
         "AM": RoleProfile(72, 81, 84, 79, 77, 72, 45, 74, 75, 58, 81),
@@ -139,8 +118,50 @@ def default_roles() -> Dict[str, RoleProfile]:
     }
 
 
+# Player overrides per preset: relative shifts (added to base stats, clamped to [20,99]).
+PLAYER_PRESETS = {
+    "Balanced": {},
+    "Possession": {
+        "ST": {"finishing": -3, "composure": +2},
+        "AM": {"passing": +4, "vision": +4, "press_resist": +3},
+        "CM": {"passing": +4, "vision": +3, "press_resist": +4},
+        "WG": {"dribbling": +2, "passing": +3},
+        "FB": {"passing": +3, "press_resist": +2},
+        "CB": {"passing": +4, "press_resist": +3},
+    },
+    "Direct Vertical": {
+        "ST": {"finishing": +5, "pace": +3, "positioning": +3},
+        "AM": {"vision": +2},
+        "CM": {"vision": +2, "stamina": +2},
+        "WG": {"pace": +5, "dribbling": +3},
+        "FB": {"pace": +4, "stamina": +2},
+        "CB": {"pace": +3, "marking": +2},
+    },
+    "Pressing Chaos": {
+        "ST": {"aggression": +6, "stamina": +4},
+        "AM": {"aggression": +5, "stamina": +5, "press_resist": +3},
+        "CM": {"aggression": +6, "stamina": +5},
+        "WG": {"aggression": +5, "stamina": +4},
+        "FB": {"aggression": +6, "stamina": +5, "marking": +3},
+        "CB": {"aggression": +5, "marking": +3, "stamina": +3},
+    },
+}
+
+
+def apply_player_preset(roles: Dict[str, RoleProfile], preset_name: str) -> Dict[str, RoleProfile]:
+    deltas = PLAYER_PRESETS.get(preset_name, {})
+    out = {}
+    for role_name, profile in roles.items():
+        shift = deltas.get(role_name, {})
+        new_vals = asdict(profile)
+        for k, d in shift.items():
+            new_vals[k] = clamp(new_vals[k] + d, 20, 99)
+        out[role_name] = RoleProfile(**new_vals)
+    return out
+
+
 # -----------------------------
-# Sidebar: presets
+# Sidebar
 # -----------------------------
 with st.sidebar:
     st.title("Football AI Balance Sandbox")
@@ -149,7 +170,7 @@ with st.sidebar:
     preset = st.selectbox(
         "Стартовый пресет",
         ["Balanced", "Possession", "Direct Vertical", "Pressing Chaos"],
-        help="Быстрый способ начать с разных игровых идентичностей.",
+        help="Быстрый способ начать с разных игровых идентичностей. Теперь меняет и статы игроков.",
     )
 
     st.markdown("---")
@@ -183,7 +204,7 @@ else:
     ai_defaults = dict(distance_penalty=49, pressure_penalty=67, openness_reward=58, risk_appetite=58, role_specialty=59, style_impact=68, skill_impact=61)
     scenario_defaults = dict(avg_shot_distance=21.0, shot_angle_quality=51, pressure=67, pass_openness=52, pass_risk=57, transition_freq=73)
 
-roles = default_roles()
+roles = apply_player_preset(base_roles(), preset)
 
 
 # -----------------------------
@@ -202,43 +223,47 @@ with target_col:
     st.subheader("1) Целевые метрики")
     t_goals = st.slider("Goals per match", 0.5, 5.0, 2.4, 0.1, help="Среднее число голов за матч. Один из главных итоговых outputs.")
     t_shots = st.slider("Shots per match", 6.0, 35.0, 21.0, 0.5, help="Среднее количество ударов за матч.")
-    t_conv = st.slider("Shot conversion", 0.03, 0.35, 0.12, 0.01, help="Доля ударов, которые превращаются в голы.")
+    t_conv = st.slider("Shot conversion", 0.03, 0.35, 0.11, 0.01, help="Доля ударов, которые превращаются в голы.")
     t_pass = st.slider("Pass success", 0.60, 0.96, 0.84, 0.01, help="Доля успешных передач.")
-    t_risk = st.slider("High-risk pass share", 0.00, 0.50, 0.16, 0.01, help="Доля рискованных передач от всех передач.")
-    t_press = st.slider("Press regain rate", 0.00, 0.30, 0.11, 0.01, help="Как часто команда возвращает мяч за счёт прессинга.")
+    t_risk = st.slider("High-risk pass share", 0.00, 0.50, 0.18, 0.01, help="Доля рискованных передач от всех передач.")
+    t_press = st.slider("Press regain rate", 0.00, 0.30, 0.09, 0.01, help="Как часто команда возвращает мяч за счёт прессинга.")
     t_dribble = st.slider("Dribble attempt share", 0.00, 0.40, 0.14, 0.01, help="Какую долю решений с мячом составляют попытки дриблинга.")
-    t_forward = st.slider("Forward shot share", 0.00, 0.80, 0.40, 0.01, help="Какая доля ударов команды приходится на форварда.")
+    t_forward = st.slider("Forward shot share", 0.00, 0.80, 0.42, 0.01, help="Какая доля ударов команды приходится на форварда.")
 
 with output_col:
-    st.subheader("2) Результат системы")
-    info = st.info(
+    st.subheader("2) Как работать со sandbox")
+    st.info(
         "Сначала попробуй попасть в target только статами. Потом повтори то же самое, но трогай только decision weights. "
         "Так ты почувствуешь разницу между балансом качеств и балансом решений.",
         icon="🧠",
     )
+    st.caption("Снапшоты текущей конфигурации с результатами сохраняются в «7) История попыток» ниже.")
 
 
-role_tabs = st.tabs(list(roles.keys()))
-for tab, role_name in zip(role_tabs, roles.keys()):
-    role = roles[role_name]
-    with tab:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            role.finishing = st.slider(f"{role_name} Finishing", 20, 99, int(role.finishing), help=TERM_HELP["Finishing"])
-            role.passing = st.slider(f"{role_name} Passing", 20, 99, int(role.passing), help=TERM_HELP["Passing"])
-            role.vision = st.slider(f"{role_name} Vision", 20, 99, int(role.vision), help=TERM_HELP["Vision"])
-            role.dribbling = st.slider(f"{role_name} Dribbling", 20, 99, int(role.dribbling), help=TERM_HELP["Dribbling"])
-        with c2:
-            role.composure = st.slider(f"{role_name} Composure", 20, 99, int(role.composure), help=TERM_HELP["Composure"])
-            role.press_resist = st.slider(f"{role_name} Press Resistance", 20, 99, int(role.press_resist), help=TERM_HELP["Press Resistance"])
-            role.marking = st.slider(f"{role_name} Marking", 20, 99, int(role.marking), help=TERM_HELP["Marking"])
-            role.pace = st.slider(f"{role_name} Pace", 20, 99, int(role.pace), help=TERM_HELP["Pace"])
-        with c3:
-            role.stamina = st.slider(f"{role_name} Stamina", 20, 99, int(role.stamina), help=TERM_HELP["Stamina"])
-            role.aggression = st.slider(f"{role_name} Aggression", 20, 99, int(role.aggression), help=TERM_HELP["Aggression"])
-            role.positioning = st.slider(f"{role_name} Positioning", 20, 99, int(role.positioning), help=TERM_HELP["Positioning"])
+# -----------------------------
+# Player stats (collapsed by default) + team aggregates preview
+# -----------------------------
+with st.expander("Статы игроков (6 ролей × 11 параметров) — раскрой чтобы крутить", expanded=False):
+    role_tabs = st.tabs(list(roles.keys()))
+    for tab, role_name in zip(role_tabs, roles.keys()):
+        role = roles[role_name]
+        with tab:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                role.finishing = st.slider(f"{role_name} Finishing", 20, 99, int(role.finishing), key=f"{role_name}_fin", help=TERM_HELP["Finishing"])
+                role.passing = st.slider(f"{role_name} Passing", 20, 99, int(role.passing), key=f"{role_name}_pas", help=TERM_HELP["Passing"])
+                role.vision = st.slider(f"{role_name} Vision", 20, 99, int(role.vision), key=f"{role_name}_vis", help=TERM_HELP["Vision"])
+                role.dribbling = st.slider(f"{role_name} Dribbling", 20, 99, int(role.dribbling), key=f"{role_name}_dri", help=TERM_HELP["Dribbling"])
+            with c2:
+                role.composure = st.slider(f"{role_name} Composure", 20, 99, int(role.composure), key=f"{role_name}_com", help=TERM_HELP["Composure"])
+                role.press_resist = st.slider(f"{role_name} Press Resistance", 20, 99, int(role.press_resist), key=f"{role_name}_pr", help=TERM_HELP["Press Resistance"])
+                role.marking = st.slider(f"{role_name} Marking", 20, 99, int(role.marking), key=f"{role_name}_mar", help=TERM_HELP["Marking"])
+                role.pace = st.slider(f"{role_name} Pace", 20, 99, int(role.pace), key=f"{role_name}_pac", help=TERM_HELP["Pace"])
+            with c3:
+                role.stamina = st.slider(f"{role_name} Stamina", 20, 99, int(role.stamina), key=f"{role_name}_sta", help=TERM_HELP["Stamina"])
+                role.aggression = st.slider(f"{role_name} Aggression", 20, 99, int(role.aggression), key=f"{role_name}_agg", help=TERM_HELP["Aggression"])
+                role.positioning = st.slider(f"{role_name} Positioning", 20, 99, int(role.positioning), key=f"{role_name}_pos", help=TERM_HELP["Positioning"])
 
-st.markdown("---")
 
 left, middle, right = st.columns(3)
 with left:
@@ -390,18 +415,6 @@ press_regain = clamp(
     + 0.05 * normalize_100(defensive_line)
     + 0.05 * normalize_100(aggression_team)
     + 0.03 * normalize_100(stamina_team)
-    - 0.04 * normalize_100(pass_resist_team if False else 0),
-    0.0,
-    0.30,
-)
-
-# Manual correction because the formula above uses a placeholder branch to keep it readable.
-press_regain = clamp(
-    0.02
-    + 0.08 * normalize_100(pressing)
-    + 0.05 * normalize_100(defensive_line)
-    + 0.05 * normalize_100(aggression_team)
-    + 0.03 * normalize_100(stamina_team)
     - 0.02 * normalize_100(pass_openness),
     0.0,
     0.30,
@@ -421,10 +434,18 @@ forward_shot_share = clamp(
 
 
 # -----------------------------
-# Output cards
+# Team aggregates preview (above output cards)
 # -----------------------------
 st.markdown("---")
 st.subheader("6) Итоговые метрики")
+
+agg_df = pd.DataFrame({
+    "Параметр": ["Finishing", "Passing", "Vision", "Dribbling", "Composure", "Press Resist", "Marking", "Pace", "Stamina", "Aggression", "Positioning"],
+    "Team aggregate": [finishing_team, passing_team, vision_team, dribbling_team, composure_team, press_resist_team, marking_team, pace_team, stamina_team, aggression_team, positioning_team],
+})
+with st.expander("Team aggregates (как статы ролей сворачиваются в командные)", expanded=False):
+    st.dataframe(agg_df.style.format({"Team aggregate": "{:.1f}"}), hide_index=True, use_container_width=True)
+
 
 metrics = [
     ("Goals per match", goals_per_match, t_goals, 0.15, "goals", "{:.2f}"),
@@ -457,47 +478,178 @@ for idx, (name, actual, target, tol, key, fmt) in enumerate(metrics):
 
 
 # -----------------------------
-# Diagnostics
+# Gap chart
+# -----------------------------
+st.markdown("#### Визуализация gap")
+st.caption("Нормализованный |actual − target| / target. Чем выше столбик, тем дальше от цели. Красный = выше target, синий = ниже.")
+
+gap_rows = []
+for name, actual, target, _tol, _key, _fmt in metrics:
+    rel_gap = (actual - target) / target if target != 0 else 0.0
+    gap_rows.append({
+        "Метрика": name,
+        "Relative gap": rel_gap,
+        "|Relative gap|": abs(rel_gap),
+        "Направление": "выше target" if actual >= target else "ниже target",
+    })
+gap_df = pd.DataFrame(gap_rows).sort_values("|Relative gap|", ascending=False)
+
+try:
+    import altair as alt
+
+    chart = (
+        alt.Chart(gap_df)
+        .mark_bar()
+        .encode(
+            x=alt.X("|Relative gap|:Q", axis=alt.Axis(format="%"), title="|actual − target| / target"),
+            y=alt.Y("Метрика:N", sort="-x"),
+            color=alt.Color(
+                "Направление:N",
+                scale=alt.Scale(domain=["выше target", "ниже target"], range=["#b91c1c", "#2563eb"]),
+            ),
+            tooltip=["Метрика", alt.Tooltip("Relative gap:Q", format=".1%"), "Направление"],
+        )
+        .properties(height=280)
+    )
+    st.altair_chart(chart, use_container_width=True)
+except ImportError:
+    st.bar_chart(gap_df.set_index("Метрика")["|Relative gap|"])
+
+
+# -----------------------------
+# Diagnostics (two-sided)
 # -----------------------------
 st.markdown("---")
 st.subheader("7) Диагностика: что крутить")
 
 advice = []
 
-if goals_per_match < t_goals:
+# Goals
+if goals_per_match < t_goals - 0.15:
     if shot_conversion < t_conv:
-        advice.append("**Не хватает реализации моментов**: попробуй поднять ST Finishing, ST Composure, Shot Angle Quality или ослабить Pressure Penalty / Pressure.")
+        advice.append("**Не хватает реализации**: подними ST Finishing, ST Composure, Shot Angle Quality или ослабь Pressure Penalty / Pressure.")
     if shots_per_match < t_shots:
-        advice.append("**Не хватает объёма атак**: попробуй поднять Tempo, Shot Bias, Transition Frequency или снизить Distance Penalty.")
+        advice.append("**Не хватает объёма атак**: подними Tempo, Shot Bias, Transition Frequency или снизь Distance Penalty.")
+elif goals_per_match > t_goals + 0.15:
+    advice.append("**Результативность выше target**: снизь ST Finishing/Composure, подними Pressure/Distance Penalty или снизь Tempo/Shot Bias.")
 
-if pass_success < t_pass:
-    advice.append("**Передачи слишком нестабильны**: подними Passing, Vision, Pass Openness или снизь Pass Risk / Pressure.")
+# Pass success
+if pass_success < t_pass - 0.015:
+    advice.append("**Передачи нестабильны**: подними Passing, Vision, Pass Openness или снизь Pass Risk / Pressure.")
+elif pass_success > t_pass + 0.015:
+    advice.append("**Пас слишком стерильный**: подними Pass Risk, Directness, Risk Appetite — команда играет в «безопасный» перекат.")
 
-if pass_risk_share < t_risk:
+# Risk share
+if pass_risk_share < t_risk - 0.015:
     advice.append("**Система слишком осторожна**: подними Directness, Risk Appetite или Pass Risk.")
-elif pass_risk_share > t_risk:
+elif pass_risk_share > t_risk + 0.015:
     advice.append("**Слишком много рискованных передач**: снизь Directness, Risk Appetite или компенсируй ростом Openness Reward.")
 
-if press_regain < t_press:
+# Press regain
+if press_regain < t_press - 0.015:
     advice.append("**Прессинг не возвращает мяч**: подними Pressing, Defensive Line, Aggression, Stamina.")
+elif press_regain > t_press + 0.015:
+    advice.append("**Прессинг возвращает слишком много** — выглядит нереалистично для PvE. Снизь Pressing/Defensive Line или подними соперниковый Pass Openness.")
 
-if dribble_share < t_dribble:
+# Dribble share
+if dribble_share < t_dribble - 0.015:
     advice.append("**Мало обыгрыша**: увеличь Dribble Bias, WG Dribbling, ST Dribbling или снизь Pass Openness.")
+elif dribble_share > t_dribble + 0.015:
+    advice.append("**Слишком много дриблинга**: снизь Dribble Bias или Dribbling ключевых ролей; подними Pass Openness / Openness Reward.")
 
-if forward_shot_share < t_forward:
+# Forward shot share
+if forward_shot_share < t_forward - 0.02:
     advice.append("**Форвард завершает слишком мало**: подними ST Positioning, ST Finishing, Role Specialty Impact, Shot Bias.")
-elif forward_shot_share > t_forward:
+elif forward_shot_share > t_forward + 0.02:
     advice.append("**Слишком много игры через форварда**: слегка снизь ST dominance или усили завершение WG / AM.")
 
+# Shots
+if shots_per_match < t_shots - 1.0:
+    advice.append("**Мало ударов**: подними Tempo, Shot Bias, Transition Frequency.")
+elif shots_per_match > t_shots + 1.0:
+    advice.append("**Слишком много ударов — команда стреляет без отбора**: снизь Tempo/Shot Bias, подними Distance Penalty.")
+
+# Shot conversion
+if shot_conversion < t_conv - 0.015:
+    advice.append("**Низкая реализация**: подними Finishing/Composure/Shot Angle Quality; уменьши Avg Shot Distance и Pressure Penalty.")
+elif shot_conversion > t_conv + 0.015:
+    advice.append("**Слишком высокая реализация**: снизь Finishing/Composure, подними Avg Shot Distance, Pressure, Distance Penalty.")
+
 if not advice:
-    advice.append("**Ты близко к цели по всем основным метрикам.** Теперь попробуй добиться того же результата меньшим числом изменений или другой игровой идентичностью.")
+    advice.append("**Ты близко к цели по всем основным метрикам.** Теперь добейся того же меньшим числом изменений или другой игровой идентичностью.")
 
 for item in advice:
     st.markdown(f"- {item}")
 
 
+# -----------------------------
+# History of attempts
+# -----------------------------
 st.markdown("---")
-st.subheader("8) Объяснение логики симулятора")
+st.subheader("8) История попыток")
+st.caption("Сохраняй снапшоты после каждого осмысленного изменения — будешь видеть, что и как двигает метрики.")
+
+if "history" not in st.session_state:
+    st.session_state["history"] = []
+
+snapshot_metrics = {name: actual for name, actual, *_ in metrics}
+snapshot_targets = {name: target for name, _actual, target, *_ in metrics}
+
+col_a, col_b, col_c = st.columns([1, 1, 1])
+with col_a:
+    note = st.text_input("Заметка к попытке", value="", placeholder="напр. «+Tempo 10, −Distance Penalty 5»")
+with col_b:
+    if st.button("💾 Сохранить попытку", use_container_width=True):
+        st.session_state["history"].append({
+            "note": note or f"{preset}",
+            "preset": preset,
+            **{f"{k} (actual)": v for k, v in snapshot_metrics.items()},
+            **{f"{k} (gap)": snapshot_metrics[k] - snapshot_targets[k] for k in snapshot_metrics},
+            "Tempo": tempo, "Directness": directness, "Pressing": pressing,
+            "Distance Penalty": distance_penalty, "Risk Appetite": risk_appetite,
+            "Shot Bias": shot_bias, "Dribble Bias": dribble_bias,
+        })
+with col_c:
+    if st.button("🗑 Очистить историю", use_container_width=True):
+        st.session_state["history"] = []
+
+if st.session_state["history"]:
+    hist_df = pd.DataFrame(st.session_state["history"])
+    # Reorder columns: note/preset first, then actuals, then gaps, then knobs
+    actual_cols = [c for c in hist_df.columns if c.endswith("(actual)")]
+    gap_cols = [c for c in hist_df.columns if c.endswith("(gap)")]
+    rest = [c for c in hist_df.columns if c not in actual_cols + gap_cols + ["note", "preset"]]
+    ordered = ["note", "preset"] + actual_cols + gap_cols + rest
+    hist_df = hist_df[ordered]
+
+    fmt_map = {c: "{:+.2f}" for c in gap_cols}
+    fmt_map.update({c: "{:.2f}" for c in actual_cols})
+
+    # Last 10 attempts, newest on top
+    display_df = hist_df.tail(10).iloc[::-1].reset_index(drop=True)
+    st.dataframe(display_df.style.format(fmt_map), use_container_width=True, hide_index=True)
+
+    # Delta vs previous attempt
+    if len(hist_df) >= 2:
+        prev = hist_df.iloc[-2]
+        curr = hist_df.iloc[-1]
+        delta_rows = []
+        for c in actual_cols:
+            d = curr[c] - prev[c]
+            if abs(d) > 1e-4:
+                delta_rows.append({"Метрика": c.replace(" (actual)", ""), "Δ vs прошлая попытка": d})
+        if delta_rows:
+            st.markdown("**Что изменилось между двумя последними попытками:**")
+            st.dataframe(pd.DataFrame(delta_rows).style.format({"Δ vs прошлая попытка": "{:+.3f}"}), hide_index=True, use_container_width=True)
+else:
+    st.info("Пока ни одной сохранённой попытки.")
+
+
+# -----------------------------
+# Explanation
+# -----------------------------
+st.markdown("---")
+st.subheader("9) Объяснение логики симулятора")
 st.markdown(
     """
 Этот sandbox учит трём слоям баланса:
